@@ -6,11 +6,18 @@ Design: `docs/superpowers/specs/2026-10-17-radar-design.md`. Wire format: `serve
 
 ## Run
 
-**1. GPU worker (RunPod).** Your teammate's lingbot-map worker lives on the pod at `/workspace/rad-ar` (port 8010). Leave it as is. If it isn't running, SSH in and start it with `/workspace/rad-ar/start_worker.sh`. On a brand-new pod, run `/workspace/setup_pod.sh` first.
-
-**2. Tunnel to the worker (MacBook).** Use the SSH address and port of the current pod:
+**1. GPU worker (AWS EC2, us-east-2).** A `g6e.xlarge` (L40S) runs the lingbot-map worker as a service on `127.0.0.1:8010`. After `aws login`:
 ```bash
-ssh -N -L 8010:localhost:8010 -p 10075 root@203.57.40.185
+server/ec2/radar-ec2.sh launch    # once: creates the instance (~$1.86/hr while running)
+server/ec2/radar-ec2.sh setup     # once: installs lingbot-map + worker (needs server/ec2/worker.py)
+server/ec2/radar-ec2.sh start     # later sessions: start the stopped instance
+server/ec2/radar-ec2.sh stop      # always stop when done testing
+```
+`server/ec2/worker.py` is the teammate's worker (same protocol the relay speaks); it's gitignored, get a copy from them.
+
+**2. Tunnel to the worker (MacBook).** Leave this running; it reconnects by itself after network changes:
+```bash
+server/ec2/radar-ec2.sh tunnel
 ```
 
 **3. Relay + hub (MacBook).**
