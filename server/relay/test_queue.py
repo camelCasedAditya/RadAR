@@ -23,7 +23,7 @@ async def main():
     async def on_status(d):
         status.update(d)
 
-    link = GpuLink("ws://127.0.0.1:8769/stream", on_points, on_status)
+    link = GpuLink("ws://127.0.0.1:8769/stream", on_points, on_status, queue_cap=60)   # big cap: test no-drop
     for (rid, f), T in poses.items():
         link.remember_pose(rid, f, T)
     task = asyncio.create_task(link.run())
@@ -50,7 +50,12 @@ async def main():
         seqs = [f for f, _ in got[rid]]
         assert seqs == sorted(seqs) and len(seqs) > 0.8 * len(sent[rid]), (rid, seqs)  # first ~8 wait for alignment travel
     lags = [l for r in got.values() for _, l in r]
-    print(f"queue ok: {total} frames, 0 dropped, in order; map lag median {sorted(lags)[len(lags)//2]:.2f}s max {max(lags):.2f}s")
+    # default cap bounds lag: a 40-frame burst keeps only the newest 15 queued
+    capped = GpuLink("unused", None, None)
+    for f in range(40):
+        capped.enqueue("A", f, b"jpg")
+    assert [f for f, _, _ in capped.queue["A"]] == list(range(25, 40)), list(capped.queue["A"])
+    print(f"queue ok: {total} frames, 0 dropped by worker, in order, cap keeps newest 15; map lag median {sorted(lags)[len(lags)//2]:.2f}s max {max(lags):.2f}s")
 
 
 p = subprocess.Popen([sys.executable, "fake_worker.py", SESSION, "--port", "8769", "--delay", "0.07"],

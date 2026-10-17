@@ -28,9 +28,10 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
 
     static let width = 518  // lingbot-map native width; height is rounded to a multiple of 14
     // ponytail: fixed map-frame gates; tune per venue (lower = denser map, more GPU lag).
-    static let mapMove: Float = 0.15         // metres moved since last map frame
-    static let mapTurn: Float = 8 * .pi / 180
+    static let mapMove: Float = 0.30         // metres moved since last map frame
+    static let mapTurn: Float = 15 * .pi / 180
     static let mapFloor: TimeInterval = 1    // at least one map frame per second
+    static let mapMinGap: TimeInterval = 1.0 / 3   // at most 3 map frames per second per phone (A40: ~9/s total)
 
     func start(url: URL, id: String) {
         queue.async { [self] in
@@ -138,6 +139,7 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     /// Moved or turned enough since the last map frame to add new geometry (or the 1 s floor passed).
     private func isMapFrame(_ T: simd_float4x4, at t: TimeInterval) -> Bool {
         guard let last = lastMap else { return true }
+        if t - last.time < Self.mapMinGap { return false }
         if t - last.time >= Self.mapFloor { return true }
         let moved = simd_distance(simd_make_float3(T.columns.3), simd_make_float3(last.T.columns.3))
         let r = simd_mul(simd_transpose(simd_float3x3(simd_make_float3(last.T.columns.0), simd_make_float3(last.T.columns.1),

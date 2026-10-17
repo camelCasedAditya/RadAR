@@ -23,7 +23,7 @@ WALLS = [("z", -1, -1, 13), ("z", 1, 1, 11), ("x", 13, -1, 7), ("x", 11, 1, 5),
          ("z", 7, -1, 13), ("z", 5, 1, 11), ("x", -1, -1, 7), ("x", 1, 1, 5)]
 
 
-def render(T16):
+def render(T16, noise=0.0, seed=0):
     """ARKit pose -> (lingbot c2w 3x4, intrinsics on depth grid, depth, conf, rgb) as the worker would send."""
     T = np.asarray(T16, float).reshape(4, 4, order="F")
     Ra, pa = T[:3, :3], T[:3, 3]
@@ -47,11 +47,17 @@ def render(T16):
     rgb = np.stack([120 + 100 * h, 140 + 0 * h, 200 - 100 * h], -1).astype(np.uint8)
     Rl = RS @ Ra @ F
     c2w = np.c_[Rl, S * RS @ pa + TS]
+    if noise:   # lingbot's own pose wobbles: rotate by ~noise deg and shift by ~noise cm (metric equiv.)
+        rng = np.random.default_rng(seed)
+        ax = rng.normal(size=3); ax /= np.linalg.norm(ax); a = np.radians(noise) * rng.normal()
+        Kx = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+        Rn = np.eye(3) + np.sin(a) * Kx + (1 - np.cos(a)) * Kx @ Kx
+        c2w = np.c_[Rn @ c2w[:, :3], c2w[:, 3] + S * 0.01 * noise * rng.normal(size=3)]
     return c2w, [fx, fx, cx, cy], np.where(seen, depth * S, 0), np.where(seen, 5.0, 0.0), rgb
 
 
-def result_msg(stream, seq, segment, idx, T16):
-    c2w, K, depth, conf, rgb = render(T16)
+def result_msg(stream, seq, segment, idx, T16, noise=0.0):
+    c2w, K, depth, conf, rgb = render(T16, noise, seq)
     header = {"type": "result", "stream": stream, "seq": seq, "segment": segment, "frame_index": idx,
               "c2w": c2w.reshape(-1).tolist(), "intrinsics": K, "model_w": W, "model_h": H,
               "depth_w": DW, "depth_h": DH, "src_w": W, "src_h": H, "infer_ms": 1.0, "keyframe": True}

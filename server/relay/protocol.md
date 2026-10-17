@@ -37,7 +37,7 @@ next 4      f        uint32 little-endian frame id
 rest        payload
 ```
 
-- kind 1 payload (**map frame**): JPEG bytes, sent only when the phone moved enough to add geometry (≥15 cm or ≥8°, at least 1 fps). Camera sensor orientation (landscape, unrotated, matching ARKit's camera transform), width 518, height a multiple of 14 (392 for iPhone's 4:3 camera). Phone must set `id` itself.
+- kind 1 payload (**map frame**): JPEG bytes, sent only when the phone moved enough to add geometry (≥30 cm or ≥15°), at least 1 and at most 3 per second. Camera sensor orientation (landscape, unrotated, matching ARKit's camera transform), width 518, height a multiple of 14 (392 for iPhone's 4:3 camera). Phone must set `id` itself.
 - kind 2 payload: `n` uint32 LE, then `n*3` float32 LE xyz (metres, ARKit frame), then `n*3` uint8 rgb. Sent by the relay after aligning the worker's depth.
 - kind 3 payload (**live video**, 30 fps): `flags` u8 (bit 0 = keyframe), then one H.264 access unit in Annex-B form (start codes). Keyframes carry SPS and PPS first. Same sensor orientation as kind 1. Relay forwards it untouched and replays the latest keyframe group to hubs that connect late.
 

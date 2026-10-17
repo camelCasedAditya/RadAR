@@ -42,7 +42,7 @@ async def on_status(d):
     await send_hubs(json.dumps({"t": "gpu", "id": "", **d}))
 
 
-def make_app(gpu_url=None, conf_min=1.5):
+def make_app(gpu_url=None, conf_min=3.0):
     @asynccontextmanager
     async def lifespan(_app):
         global link
@@ -72,7 +72,7 @@ def make_app(gpu_url=None, conf_min=1.5):
                     if link and d["t"] == "hello":
                         await link.reset(rid)
                     elif link and d["t"] == "pose":
-                        link.remember_pose(rid, d["f"], d["T"])
+                        link.remember_pose(rid, d["f"], d["T"], d.get("K"))
                 elif m.get("bytes") is not None:
                     b = m["bytes"]
                     kind, _, f, payload = unpack_bin(b)
@@ -122,6 +122,6 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--gpu", help="lingbot worker websocket, e.g. ws://localhost:8010/stream")
     # ponytail: one global confidence cut; tune per venue by watching the hub for floaters vs holes.
-    ap.add_argument("--conf", type=float, default=1.5, help="drop depth pixels below this lingbot confidence")
+    ap.add_argument("--conf", type=float, default=3.0, help="drop depth pixels below this lingbot confidence")
     a = ap.parse_args()
     uvicorn.run(make_app(a.gpu, a.conf), host="0.0.0.0", port=a.port, ws_max_size=8 * 1024 * 1024)
