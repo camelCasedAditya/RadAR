@@ -134,7 +134,8 @@ function onPoints(id, payload) {
 
 // ---------- socket ----------
 const conn = document.getElementById("conn");
-const handlers = { pose: onPose };   // add-on modules register more types here
+let gpu = null;                        // latest status from the GPU worker, via the relay
+const handlers = { pose: onPose, gpu: (d) => { gpu = { ...d, at: performance.now() }; } };   // add-on modules register more types here
 window.radar = { scene, responders, responder, handlers, THREE };
 
 function connect() {
@@ -182,6 +183,8 @@ setInterval(() => {
     r.meta.textContent = `${fps.toFixed(0)} fps · ${(r.ptsN / 1000).toFixed(0)}k pts`;
     return `<span class="${stale ? "warn" : ""}">${r.id}: ${fps.toFixed(0)} fps, ${stale ? `lost ${age.toFixed(0)}s` : "ok"}, ${(r.ptsN / 1000).toFixed(0)}k pts</span>`;
   }).join("") || "<span>waiting for responders…</span>";
+  const g = gpu && now - gpu.at < 6000;
+  status.innerHTML += g ? `<span>GPU ${gpu.fps} fps · ${gpu.mem_gb} GB</span>` : `<span class="warn">GPU offline</span>`;
 }, 500);
 
 renderer.setAnimationLoop(() => {

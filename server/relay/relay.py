@@ -1,23 +1,27 @@
 """RadAR relay. Runs on the MacBook. See protocol.md.
 
-    python relay.py            # serves http://0.0.0.0:8000, hub at /
+    python relay.py                                        # phones + hub only
+    python relay.py --gpu ws://localhost:8010/stream       # plus 3D reconstruction (GPU worker via SSH tunnel)
 """
+import argparse
+import asyncio
 import json
 import pathlib
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from wire import KIND_JPEG, unpack_bin
+from gpu_link import GpuLink
+from wire import KIND_JPEG, KIND_POINTS, pack_bin, pack_points, unpack_bin
 
 HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
 
-app = FastAPI()
 hubs: set[WebSocket] = set()
-gpus: dict[str, WebSocket] = {}
 state: dict[str, dict] = {}          # id -> {msg type -> latest msg}
 last_jpeg: dict[str, bytes] = {}     # id -> latest jpeg binary message
+link: GpuLink | None = None
 
 
 async def send_hubs(msg):
@@ -28,72 +32,85 @@ async def send_hubs(msg):
             hubs.discard(ws)
 
 
-async def send_gpu(rid, msg):
-    ws = gpus.get(rid)
-    if not ws:
-        return
-    try:
-        await (ws.send_text(msg) if isinstance(msg, str) else ws.send_bytes(msg))
-    except Exception:
-        gpus.pop(rid, None)
+async def on_points(rid, f, xyz, rgb, infer_ms):
+    await send_hubs(pack_bin(KIND_POINTS, rid, f, pack_points(xyz, rgb)))
 
 
-@app.websocket("/phone/{rid}")
-async def phone(ws: WebSocket, rid: str):
-    await ws.accept()
-    try:
-        while True:
-            m = await ws.receive()
-            if m["type"] == "websocket.disconnect":
-                break
-            if m.get("text") is not None:
-                d = json.loads(m["text"])
-                d["id"] = rid
-                state.setdefault(rid, {})[d["t"]] = d
-                txt = json.dumps(d)
-                await send_hubs(txt)
-                if d["t"] == "pose":
-                    await send_gpu(rid, txt)
-            elif m.get("bytes") is not None:
-                b = m["bytes"]
-                if unpack_bin(b)[0] == KIND_JPEG:
-                    last_jpeg[rid] = b
-                    await send_hubs(b)
-                    await send_gpu(rid, b)
-    except WebSocketDisconnect:
-        pass
+async def on_status(d):
+    await send_hubs(json.dumps({"t": "gpu", "id": "", **d}))
 
 
-@app.websocket("/gpu/{rid}")
-async def gpu(ws: WebSocket, rid: str):
-    await ws.accept()
-    gpus[rid] = ws
-    try:
-        while True:
-            await send_hubs(await ws.receive_bytes())
-    except WebSocketDisconnect:
-        pass
-    finally:
-        if gpus.get(rid) is ws:
-            gpus.pop(rid)
+def make_app(gpu_url=None, conf_min=1.5):
+    @asynccontextmanager
+    async def lifespan(_app):
+        global link
+        task = None
+        if gpu_url:
+            link = GpuLink(gpu_url, on_points, on_status, conf_min=conf_min)
+            task = asyncio.create_task(link.run())
+        yield
+        if task:
+            task.cancel()
 
+    app = FastAPI(lifespan=lifespan)
 
-@app.websocket("/hub")
-async def hub(ws: WebSocket):
-    await ws.accept()
-    await ws.send_text(json.dumps({"t": "state", "responders": state}))
-    for b in last_jpeg.values():
-        await ws.send_bytes(b)
-    hubs.add(ws)
-    try:
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        hubs.discard(ws)
+    @app.websocket("/phone/{rid}")
+    async def phone(ws: WebSocket, rid: str):
+        await ws.accept()
+        try:
+            while True:
+                m = await ws.receive()
+                if m["type"] == "websocket.disconnect":
+                    break
+                if m.get("text") is not None:
+                    d = json.loads(m["text"])
+                    d["id"] = rid
+                    state.setdefault(rid, {})[d["t"]] = d
+                    await send_hubs(json.dumps(d))
+                    if link and d["t"] == "hello":
+                        await link.reset(rid)
+                    elif link and d["t"] == "pose":
+                        link.remember_pose(rid, d["f"], d["T"])
+                elif m.get("bytes") is not None:
+                    b = m["bytes"]
+                    kind, _, f, payload = unpack_bin(b)
+                    if kind == KIND_JPEG:
+                        last_jpeg[rid] = b
+                        await send_hubs(b)
+                        if link:
+                            await link.send_frame(rid, f, payload)
+        except WebSocketDisconnect:
+            pass
 
+    @app.websocket("/hub")
+    async def hub(ws: WebSocket):
+        await ws.accept()
+        await ws.send_text(json.dumps({"t": "state", "responders": state}))
+        for b in last_jpeg.values():
+            await ws.send_bytes(b)
+        hubs.add(ws)
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            hubs.discard(ws)
 
-if HUB_DIR.exists():
-    app.mount("/", StaticFiles(directory=HUB_DIR, html=True), name="hub")
+    @app.middleware("http")
+    async def no_cache(request, call_next):
+        resp = await call_next(request)
+        resp.headers["Cache-Control"] = "no-cache"     # hub edits show up on plain reload
+        return resp
+
+    if HUB_DIR.exists():
+        app.mount("/", StaticFiles(directory=HUB_DIR, html=True), name="hub")
+    return app
+
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, ws_max_size=8 * 1024 * 1024)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--gpu", help="lingbot worker websocket, e.g. ws://localhost:8010/stream")
+    # ponytail: one global confidence cut; tune per venue by watching the hub for floaters vs holes.
+    ap.add_argument("--conf", type=float, default=1.5, help="drop depth pixels below this lingbot confidence")
+    a = ap.parse_args()
+    uvicorn.run(make_app(a.gpu, a.conf), host="0.0.0.0", port=a.port, ws_max_size=8 * 1024 * 1024)

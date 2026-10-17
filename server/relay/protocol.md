@@ -1,11 +1,11 @@
 # RadAR wire protocol
 
-One relay, three kinds of client. All over WebSocket.
+One relay, two kinds of client, plus an outbound link to the GPU worker. All over WebSocket.
 
 | Client | Endpoint | Sends | Receives |
 |---|---|---|---|
 | Phone | `/phone/{id}` | text + jpeg binary | nothing |
-| GPU worker | `/gpu/{id}` | points binary | that phone's text + jpeg |
+| GPU worker | — | relay connects out to it (`--gpu`), see `gpu_link.py` | |
 | Hub | `/hub` | nothing | everything, plus `state` on connect |
 
 `id` is a short responder id, e.g. `A`, `B`.
@@ -23,6 +23,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 | `gps` | `lat`, `lon`, `heading` | phone | Module D |
 | `peer_pose` | `peer`, `T` | phone | Module E |
 | `uwb_check` | `peer`, `uwb`, `arkit`, `mismatch` (bool) | relay | Module C |
+| `gpu` | `fps`, `mem_gb`, `streams`, `gpu` (worker status, ~every 2 s) | relay | |
 | `state` | `responders`: `{id: {pose, head, uwb, gps, ...}}` latest text message of each type | relay | sent to hub on connect |
 
 ## Binary messages
@@ -36,6 +37,6 @@ rest        payload
 ```
 
 - kind 1 payload: JPEG bytes. Camera sensor orientation (landscape, unrotated, matching ARKit's camera transform), width 518, height a multiple of 14 (392 for iPhone's 4:3 camera). Phone must set `id` itself.
-- kind 2 payload: `n` uint32 LE, then `n*3` float32 LE xyz (metres, ARKit frame), then `n*3` uint8 rgb.
+- kind 2 payload: `n` uint32 LE, then `n*3` float32 LE xyz (metres, ARKit frame), then `n*3` uint8 rgb. Sent by the relay after aligning the worker's depth.
 
 Helpers: `server/relay/wire.py` (`pack_bin`, `unpack_bin`, `pack_points`, `unpack_points`).
