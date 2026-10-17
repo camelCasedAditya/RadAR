@@ -6,7 +6,16 @@ Design: `docs/superpowers/specs/2026-10-17-radar-design.md`. Wire format: `serve
 
 ## Run
 
-**1. GPU worker (AWS EC2, us-east-2).** A `g6e.xlarge` (L40S) runs the lingbot-map worker as a service on `127.0.0.1:8010`. After `aws login`:
+**1. GPU worker.** Either option runs the same lingbot worker on `127.0.0.1:8010` on the GPU box; the relay reaches it through an SSH tunnel.
+
+*RunPod (current).* On a PyTorch 2.8 / CUDA 12.8 pod with SSH over exposed TCP, from the repo root:
+```bash
+scp -P <port> server/ec2/worker.py server/ec2/setup_runpod.sh server/ec2/start_worker_runpod.sh root@<ip>:/workspace/
+ssh -p <port> root@<ip> 'mkdir -p /workspace/rad-ar && mv /workspace/worker.py /workspace/rad-ar/ && bash /workspace/setup_runpod.sh'
+```
+After a pod restart: `ssh -p <port> root@<ip> bash /workspace/start_worker_runpod.sh`. Tunnel: `ssh -N -L 8010:localhost:8010 -p <port> root@<ip>`. The first frames after a fresh install take a few seconds while FlashInfer compiles its kernels (needs `nvcc` on PATH, which the start script sets).
+
+*AWS EC2 (us-east-2, needs G-instance quota).* A `g6e.xlarge` (L40S) runs the lingbot-map worker as a service on `127.0.0.1:8010`. After `aws login`:
 ```bash
 server/ec2/radar-ec2.sh launch    # once: creates the instance (~$1.86/hr while running)
 server/ec2/radar-ec2.sh setup     # once: installs lingbot-map + worker (needs server/ec2/worker.py)
