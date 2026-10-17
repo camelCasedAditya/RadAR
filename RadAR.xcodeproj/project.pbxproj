@@ -253,6 +253,9 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "RadAR-Info.plist";
+				INFOPLIST_KEY_NSCameraUsageDescription = "RadAR streams your camera to mission control to build a 3D map.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "RadAR connects to the mission control relay on this network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -284,6 +287,9 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "RadAR-Info.plist";
+				INFOPLIST_KEY_NSCameraUsageDescription = "RadAR streams your camera to mission control to build a 3D map.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "RadAR connects to the mission control relay on this network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

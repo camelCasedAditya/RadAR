@@ -1,0 +1,6 @@
+# relay (MacBook) and GPU worker (RunPod). lingbot-map itself is installed separately on RunPod, see README.
+fastapi
+uvicorn[standard]
+websockets
+numpy
+pillow
