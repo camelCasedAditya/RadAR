@@ -4,13 +4,25 @@ import simd
 /// Message encoding. Must match server/relay/protocol.md and server/relay/wire.py.
 nonisolated enum Wire {
     /// Binary frame: [kind, idlen, id..., frameId u32 LE, payload...]
-    static func jpegFrame(id: String, frame: UInt32, jpeg: Data) -> Data {
+    static func binary(kind: UInt8, id: String, frame: UInt32, payload: Data) -> Data {
         let idBytes = Data(id.utf8)
-        var d = Data([1, UInt8(idBytes.count)])
+        var d = Data([kind, UInt8(idBytes.count)])
         d.append(idBytes)
         withUnsafeBytes(of: frame.littleEndian) { d.append(contentsOf: $0) }
-        d.append(jpeg)
+        d.append(payload)
         return d
+    }
+
+    /// Map frame for the GPU (kind 1).
+    static func jpegFrame(id: String, frame: UInt32, jpeg: Data) -> Data {
+        binary(kind: 1, id: id, frame: frame, payload: jpeg)
+    }
+
+    /// Live video (kind 3): flags byte (bit 0 = keyframe) + Annex-B access unit.
+    static func h264Frame(id: String, frame: UInt32, keyframe: Bool, annexB: Data) -> Data {
+        var p = Data([keyframe ? 1 : 0])
+        p.append(annexB)
+        return binary(kind: 3, id: id, frame: frame, payload: p)
     }
 
     /// `pose` text message. T is camera-to-world, column-major, metres.

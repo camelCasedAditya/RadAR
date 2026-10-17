@@ -5,6 +5,7 @@ import numpy as np
 
 KIND_JPEG = 1
 KIND_POINTS = 2
+KIND_H264 = 3     # payload: flags u8 (bit 0 = keyframe), then Annex-B H.264 access unit
 
 
 def pack_bin(kind: int, rid: str, f: int, payload: bytes) -> bytes:

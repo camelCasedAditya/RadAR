@@ -1,6 +1,7 @@
 // RadAR hub. Protocol: server/relay/protocol.md
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { onVideo, videoSupported } from "./video.js";
 
 const COLORS = ["#3fa7ff", "#ff9f1c", "#2ec4b6", "#e84855"];
 const MAX_POINTS = 3_000_000;   // per responder; ring buffer wraps when full
@@ -66,11 +67,13 @@ function responder(id) {
   const el = document.createElement("section");
   el.className = "feed";
   el.innerHTML = `<header><span class="dot" style="background:${COLORS[responders.size % COLORS.length]}"></span>
-    <b>Responder ${id}</b><span class="meta"></span></header><img alt="Live camera from responder ${id}">`;
+    <b>Responder ${id}</b><span class="meta"></span></header><img alt="Live camera from responder ${id}">
+    <canvas aria-label="Live video from responder ${id}"></canvas>`;
   side.appendChild(el);
 
   r = { id, color, marker, arrow, trail, trailPts: [], cloud, ptsN: 0, ptsHead: 0,
         img: el.querySelector("img"), meta: el.querySelector(".meta"), imgURL: null,
+        canvas: el.querySelector("canvas"), feed: el, decoder: null, videoTimes: [], mapLag: null,
         pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0 };
   responders.set(id, r);
   return r;
@@ -135,7 +138,11 @@ function onPoints(id, payload) {
 // ---------- socket ----------
 const conn = document.getElementById("conn");
 let gpu = null;                        // latest status from the GPU worker, via the relay
-const handlers = { pose: onPose, gpu: (d) => { gpu = { ...d, at: performance.now() }; } };   // add-on modules register more types here
+const handlers = {
+  pose: onPose,
+  gpu: (d) => { gpu = { ...d, at: performance.now() }; },
+  maplag: (d) => { responder(d.id).mapLag = d; },
+};   // add-on modules register more types here
 window.radar = { scene, responders, responder, handlers, THREE };
 
 function connect() {
@@ -158,6 +165,11 @@ function connect() {
     const payload = b.subarray(6 + idlen);
     if (kind === 1) onJpeg(id, payload);
     else if (kind === 2) onPoints(id, payload);
+    else if (kind === 3 && videoSupported) {
+      const r = responder(id);
+      r.lastSeen = performance.now();
+      onVideo(r, new DataView(b.buffer, 2 + idlen, 4).getUint32(0, true), payload);
+    }
   };
 }
 connect();
@@ -180,8 +192,11 @@ setInterval(() => {
     const age = (now - r.lastSeen) / 1000;
     const fps = r.poseTimes.length / 2;
     const stale = age > 2;
-    r.meta.textContent = `${fps.toFixed(0)} fps · ${(r.ptsN / 1000).toFixed(0)}k pts`;
-    return `<span class="${stale ? "warn" : ""}">${r.id}: ${fps.toFixed(0)} fps, ${stale ? `lost ${age.toFixed(0)}s` : "ok"}, ${(r.ptsN / 1000).toFixed(0)}k pts</span>`;
+    while (r.videoTimes.length && now - r.videoTimes[0] > 2000) r.videoTimes.shift();
+    const vfps = r.videoTimes.length / 2;
+    const lag = r.mapLag ? `map lag ${r.mapLag.lag.toFixed(1)}s${r.mapLag.queued ? ` (${r.mapLag.queued} queued)` : ""}` : "map waiting";
+    r.meta.textContent = `video ${vfps.toFixed(0)} fps · ${lag}`;
+    return `<span class="${stale ? "warn" : ""}">${r.id}: ${stale ? `lost ${age.toFixed(0)}s` : `pose ${fps.toFixed(0)} fps`}, video ${vfps.toFixed(0)} fps, ${lag}, ${(r.ptsN / 1000).toFixed(0)}k pts</span>`;
   }).join("") || "<span>waiting for responders…</span>";
   const g = gpu && now - gpu.at < 6000;
   status.innerHTML += g ? `<span>GPU ${gpu.fps} fps · ${gpu.mem_gb} GB</span>` : `<span class="warn">GPU offline</span>`;

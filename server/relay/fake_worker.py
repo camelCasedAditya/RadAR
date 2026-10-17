@@ -60,7 +60,7 @@ def result_msg(stream, seq, segment, idx, T16):
             + conf.astype(np.float16).tobytes() + rgb.tobytes())
 
 
-def make_app(session_path, scale_frames=8):
+def make_app(session_path, scale_frames=8, delay=0.0):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     poses = {}
     for line in open(session_path):
@@ -70,11 +70,44 @@ def make_app(session_path, scale_frames=8):
             if d["t"] == "pose":
                 poses[(d["id"], d["f"])] = d["T"]
     app = FastAPI()
+    stats = {"processed": 0, "dropped": 0}
 
     @app.websocket("/stream")
     async def stream(ws: WebSocket):
+        """Mirrors the real worker's loop: per-stream pending queue that keeps only the newest
+        max(2, frames still needed for the scale block), and one frame at a time at `delay` s each."""
+        import asyncio
+        from collections import deque
         await ws.accept()
-        st = {}   # stream -> {"segment", "buf", "n"}
+        st, pending, wake = {}, {}, asyncio.Event()
+
+        async def infer_loop():
+            while True:
+                await wake.wait()
+                wake.clear()
+                while any(pending.values()):
+                    for name, q in list(pending.items()):
+                        if not q:
+                            continue
+                        seq, T = q.popleft()
+                        s = st[name]
+                        await asyncio.sleep(delay)
+                        stats["processed"] += 1
+                        s["buf"].append((seq, T))
+                        if s["n"] < scale_frames and len(s["buf"]) < scale_frames:
+                            continue                  # like lingbot: the scale block answers all at once
+                        for q2, Tq in s["buf"]:
+                            await ws.send_bytes(result_msg(name, q2, s["segment"], s["n"], Tq))
+                            s["n"] += 1
+                        s["buf"] = []
+
+        async def status_loop():
+            while True:
+                await asyncio.sleep(0.5)
+                await ws.send_text(json.dumps({"type": "status", "streams": len(st), "gpu": "fake",
+                                               "mem_gb": 0, "fps": round(1 / max(delay, 1e-3), 1), **stats}))
+
+        tasks = [asyncio.create_task(infer_loop()), asyncio.create_task(status_loop())]
         try:
             while True:
                 m = await ws.receive()
@@ -85,6 +118,7 @@ def make_app(session_path, scale_frames=8):
                     if d.get("type") == "reset" and d["stream"] in st:
                         s = st[d["stream"]]
                         s["segment"] += 1; s["buf"] = []; s["n"] = 0
+                        pending.get(d["stream"], deque()).clear()
                     continue
                 data = m["bytes"]
                 (hlen,) = struct.unpack_from("<I", data, 0)
@@ -94,17 +128,18 @@ def make_app(session_path, scale_frames=8):
                 T = poses.get((name.removeprefix("radar-"), seq))
                 if T is None:
                     continue
-                s["buf"].append((seq, T))
-                if s["n"] < scale_frames and len(s["buf"]) < scale_frames:
-                    continue                      # like lingbot: the scale block answers all at once
-                for q, Tq in s["buf"]:
-                    await ws.send_bytes(result_msg(name, q, s["segment"], s["n"], Tq))
-                    s["n"] += 1
-                s["buf"] = []
-                if seq % 20 == 0:
-                    await ws.send_text(json.dumps({"type": "status", "streams": len(st), "gpu": "fake", "mem_gb": 0, "fps": 10.0}))
+                q = pending.setdefault(name, deque())
+                q.append((seq, T))
+                keep = max(2, scale_frames - (s["n"] + len(s["buf"])))
+                while len(q) > keep:
+                    q.popleft()
+                    stats["dropped"] += 1
+                wake.set()
         except WebSocketDisconnect:
             pass
+        finally:
+            for t in tasks:
+                t.cancel()
 
     return app
 
@@ -114,5 +149,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("session")
     ap.add_argument("--port", type=int, default=8010)
+    ap.add_argument("--delay", type=float, default=0.0, help="seconds per frame, like GPU inference (real: ~0.07)")
     a = ap.parse_args()
-    uvicorn.run(make_app(a.session), host="127.0.0.1", port=a.port, ws_max_size=16 * 1024 * 1024)
+    uvicorn.run(make_app(a.session, delay=a.delay), host="127.0.0.1", port=a.port, ws_max_size=16 * 1024 * 1024)

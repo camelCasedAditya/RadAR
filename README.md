@@ -20,7 +20,7 @@ python server/relay/relay.py --gpu ws://localhost:8010/stream
 ```
 Open http://localhost:8000. The status strip says "GPU … fps" once the worker is connected. Phones and Mac must be on the same network (a phone hotspot works).
 
-**4. Phones.** Build `RadAR.xcodeproj` to each phone (set your signing team). Enter `ws://<mac-ip>:8000` and a responder ID (`A`, `B`). Both responders stand on the same floor mark facing the same wall and tap Start. The 3D cloud appears after about half a metre of walking.
+**4. Phones.** Build `RadAR.xcodeproj` to each phone (set your signing team). Enter `ws://<mac-ip>:8000` and a responder ID (`A`, `B`). Both responders stand on the same floor mark facing the same wall and tap Start. The hub shows 30 fps video right away; the 3D cloud appears after about half a metre of walking and trails you by a few seconds (shown as "map lag").
 
 The relay sends each phone's frames to the worker as stream `radar-<id>`, unprojects the returned depth, and aligns it to ARKit's metric frame (`server/relay/gpu_link.py`, `align.py`). `--conf` sets the depth-confidence cut (default 1.5).
 
@@ -36,5 +36,5 @@ python session.py replay ../sessions/fake_corridor.jsonl --loop  # terminal 3
 
 ## Tests
 ```bash
-cd server/relay && python wire.py && python align.py && python test_link.py && python test_relay.py
+cd server/relay && python wire.py && python align.py && python test_link.py && python test_queue.py && python test_relay.py
 ```

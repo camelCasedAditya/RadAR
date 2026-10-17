@@ -14,13 +14,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from gpu_link import GpuLink
-from wire import KIND_JPEG, KIND_POINTS, pack_bin, pack_points, unpack_bin
+from wire import KIND_H264, KIND_JPEG, KIND_POINTS, pack_bin, pack_points, unpack_bin
 
 HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
 
 hubs: set[WebSocket] = set()
 state: dict[str, dict] = {}          # id -> {msg type -> latest msg}
 last_jpeg: dict[str, bytes] = {}     # id -> latest jpeg binary message
+gop: dict[str, list[bytes]] = {}     # id -> latest h264 keyframe + frames since, for late hubs
 link: GpuLink | None = None
 
 
@@ -32,8 +33,9 @@ async def send_hubs(msg):
             hubs.discard(ws)
 
 
-async def on_points(rid, f, xyz, rgb, infer_ms):
+async def on_points(rid, f, xyz, rgb, lag, queued):
     await send_hubs(pack_bin(KIND_POINTS, rid, f, pack_points(xyz, rgb)))
+    await send_hubs(json.dumps({"t": "maplag", "id": rid, "lag": round(lag, 2), "queued": queued}))
 
 
 async def on_status(d):
@@ -78,7 +80,13 @@ def make_app(gpu_url=None, conf_min=1.5):
                         last_jpeg[rid] = b
                         await send_hubs(b)
                         if link:
-                            await link.send_frame(rid, f, payload)
+                            link.enqueue(rid, f, payload)
+                    elif kind == KIND_H264:
+                        if payload[0] & 1:
+                            gop[rid] = []
+                        if rid in gop and len(gop[rid]) < 120:   # ponytail: caps a stuck GOP at ~4 s of video
+                            gop[rid].append(b)
+                        await send_hubs(b)
         except WebSocketDisconnect:
             pass
 
@@ -88,6 +96,9 @@ def make_app(gpu_url=None, conf_min=1.5):
         await ws.send_text(json.dumps({"t": "state", "responders": state}))
         for b in last_jpeg.values():
             await ws.send_bytes(b)
+        for frames in gop.values():
+            for b in frames:
+                await ws.send_bytes(b)
         hubs.add(ws)
         try:
             while True:

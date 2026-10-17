@@ -16,6 +16,9 @@
   .feed header { display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--line); }
   .feed .dot { width:10px; height:10px; border-radius:50%; }
   .feed img { display:block; width:100%; aspect-ratio:518/378; object-fit:cover; background:#000; }
+  .feed canvas { display:none; width:100%; max-height:55vh; object-fit:contain; background:#000; }
+  .feed.has-video canvas { display:block; }
+  .feed.has-video img { display:none; }
   .feed .meta { color:var(--dim); margin-left:auto; }
   #status { grid-column:1; display:flex; gap:18px; padding:6px 12px; border-top:1px solid var(--line); background:var(--panel); white-space:nowrap; overflow-x:auto; }
   #status .warn { color:var(--warn); }

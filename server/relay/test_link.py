@@ -24,7 +24,7 @@ for f in range(450):                                    # one full loop, all cor
     link.remember_pose("A", f, T)
     out = link.handle_result(result_msg("radar-A", f, 1, f, T))
     if out:
-        rid, seq, xyz, rgb, _ = out
+        rid, seq, xyz, rgb = out
         assert rid == "A" and seq == f and len(xyz) == len(rgb)
         worst = max(worst, wall_error(xyz.astype(float)).max())
         frames, pts = frames + 1, pts + len(xyz)

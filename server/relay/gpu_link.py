@@ -1,7 +1,8 @@
 """Client for the lingbot-map worker on the GPU pod (/workspace/rad-ar/worker.py, port 8010, /stream).
 
 That worker only sees images and answers in lingbot's own unscaled frame. This side:
-  - sends each phone JPEG as  u32 header_len | JSON {"type":"frame","stream","seq"} | jpeg
+  - queues each phone map JPEG in order, keeps only a few in flight (the worker drops when it is
+    behind, so we never let it fall behind), and sends  u32 header_len | JSON {"type":"frame","stream","seq"} | jpeg
   - receives                   u32 header_len | JSON result header | depth f16 | conf f16 | rgb u8
   - unprojects depth with the returned c2w (OpenCV axes) and intrinsics
   - aligns lingbot -> ARKit metric frame with the phone's own pose for the same seq (align.py)
@@ -9,6 +10,8 @@ That worker only sees images and answers in lingbot's own unscaled frame. This s
 import asyncio
 import json
 import struct
+import time
+from collections import deque
 
 import numpy as np
 import websockets
@@ -16,6 +19,10 @@ import websockets
 from align import Aligner, arkit_Rp
 
 STREAM_PREFIX = "radar-"     # keep our stream names apart from anyone else using the worker
+IN_FLIGHT = 2                # frames per stream at the worker once it is streaming (its own queue keeps 2)
+SCALE_FRAMES = 8             # worker answers nothing until it has this many after a (re)start
+SCALE_WAIT = 1.0             # s with no answer before we assume it is collecting scale frames
+LOST_AFTER = 10.0            # s before an unanswered frame is written off
 
 
 def pack(header: dict, payload: bytes = b"") -> bytes:
@@ -47,10 +54,15 @@ def unproject(h, depth, conf, rgb, conf_min):
 
 
 class GpuLink:
-    def __init__(self, url, on_points, on_status, conf_min=1.5, max_points=20_000):
+    def __init__(self, url, on_points, on_status, conf_min=1.5, max_points=20_000, queue_cap=60):
         self.url, self.on_points, self.on_status = url, on_points, on_status
         self.conf_min, self.max_points = conf_min, max_points
         self.ws = None
+        # ponytail: fixed cap; at ~6 map fps per phone 60 frames is ~10 s of lag before oldest frames drop.
+        self.queue: dict[str, deque] = {}               # rid -> (f, jpeg, t_enqueued), oldest first
+        self.inflight: dict[str, dict[int, tuple]] = {}  # rid -> {f: (t_enqueued, t_sent)}
+        self.wake = asyncio.Event()
+        self.queue_cap = queue_cap
         self.poses: dict[str, dict[int, list]] = {}      # rid -> {frame id: ARKit T}
         self.aligners: dict[str, Aligner] = {}
         self.segments: dict[str, int] = {}
@@ -61,18 +73,51 @@ class GpuLink:
         if len(p) > 300:
             p.pop(next(iter(p)))
 
-    async def send_frame(self, rid, f, jpeg):
-        if self.ws is None:
-            return
-        try:
-            await self.ws.send(pack({"type": "frame", "stream": STREAM_PREFIX + rid, "seq": f}, jpeg))
-        except websockets.ConnectionClosed:
-            pass
+    def enqueue(self, rid, f, jpeg):
+        q = self.queue.setdefault(rid, deque(maxlen=self.queue_cap))
+        q.append((f, jpeg, time.time()))
+        self.wake.set()
+
+    def window(self, rid, now):
+        fl = self.inflight.setdefault(rid, {})
+        for f in [f for f, (_, ts) in fl.items() if now - ts > LOST_AFTER]:
+            del fl[f]
+        waiting = fl and now - min(ts for _, ts in fl.values()) > SCALE_WAIT
+        return SCALE_FRAMES if waiting else IN_FLIGHT
+
+    async def pump(self):
+        """Send queued frames whenever a stream has room in its window."""
+        while True:
+            try:
+                await asyncio.wait_for(self.wake.wait(), 0.25)
+            except asyncio.TimeoutError:
+                pass
+            self.wake.clear()
+            if self.ws is None:
+                continue
+            now = time.time()
+            for rid, q in self.queue.items():
+                fl = self.inflight.setdefault(rid, {})
+                while q and len(fl) < self.window(rid, now):
+                    f, jpeg, t_enq = q.popleft()
+                    fl[f] = (t_enq, now)
+                    try:
+                        await self.ws.send(pack({"type": "frame", "stream": STREAM_PREFIX + rid, "seq": f}, jpeg))
+                    except websockets.ConnectionClosed:
+                        break
+
+    def answered(self, rid, seq):
+        """Free the window slot; returns seconds from capture to now (map lag)."""
+        t = self.inflight.get(rid, {}).pop(seq, None)
+        self.wake.set()
+        return time.time() - t[0] if t else None
 
     async def reset(self, rid):
         """Phone (re)started: its ARKit origin moved, so drop the lingbot sequence and alignment."""
         self.poses.pop(rid, None)
         self.aligners.pop(rid, None)
+        self.queue.pop(rid, None)
+        self.inflight.pop(rid, None)
         if self.ws is not None:
             try:
                 await self.ws.send(json.dumps({"type": "reset", "stream": STREAM_PREFIX + rid}))
@@ -96,13 +141,20 @@ class GpuLink:
         if len(xyz) > self.max_points:
             idx = np.random.default_rng(h["seq"]).choice(len(xyz), self.max_points, replace=False)
             xyz, col = xyz[idx], col[idx]
-        return rid, h["seq"], al.apply(xyz), col, h.get("infer_ms")
+        return rid, h["seq"], al.apply(xyz), col
 
     async def run(self):
+        pump = asyncio.create_task(self.pump())
+        try:
+            await self._connect_loop()
+        finally:
+            pump.cancel()
+
+    async def _connect_loop(self):
         backoff = 1
         while True:
             try:
-                async with websockets.connect(self.url, max_size=None, ping_interval=20) as ws:
+                async with websockets.connect(self.url, max_size=None, ping_interval=20, ping_timeout=60) as ws:  # pongs queue behind frames on the tunnel
                     print(f"gpu link up: {self.url}", flush=True)
                     self.ws, backoff = ws, 1
                     self.aligners.clear()
@@ -113,12 +165,18 @@ class GpuLink:
                                 await self.on_status(d)
                             elif d.get("type") == "error":
                                 print("gpu error:", d, flush=True)
+                                self.inflight.pop(d.get("stream", "").removeprefix(STREAM_PREFIX), None)
                             continue
+                        (hlen,) = struct.unpack_from("<I", m, 0)
+                        h = json.loads(m[4:4 + hlen])
+                        rid = h["stream"].removeprefix(STREAM_PREFIX)
+                        lag = self.answered(rid, h["seq"])
                         out = await asyncio.to_thread(self.handle_result, m)
-                        if out:
-                            await self.on_points(*out)
+                        if out and lag is not None:
+                            await self.on_points(*out, lag, len(self.queue.get(rid, ())))
             except (OSError, websockets.ConnectionClosed, websockets.InvalidHandshake) as e:
                 print(f"gpu link down ({e!r}); retry in {backoff}s", flush=True)
             self.ws = None
+            self.inflight.clear()
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 15)
