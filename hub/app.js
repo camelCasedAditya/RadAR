@@ -76,12 +76,9 @@ function responder(id) {
   marker.visible = false;
   scene.add(marker);
 
-  const trailGeo = new THREE.BufferGeometry();       // movement path on the floor, whole session
-  trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(PATH_CAP * 3), 3));
-  trailGeo.setDrawRange(0, 0);
-  const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color }));
-  trail.frustumCulled = false;
-  scene.add(trail);
+  // movement paths on the floor: the live one, and a loaded past map's, kept apart so a phone that is
+  // live while a map is loaded never zig-zags between the two
+  const trail = makePath(color), mapPath = makePath(color);
 
   const patches = new THREE.Group();   // LiDAR photo patches (meshes) and their dot twins
   scene.add(patches);
@@ -105,7 +102,7 @@ function responder(id) {
     <span class="hr" hidden aria-live="off"></span><div class="peers"></div></div>`;
   side.appendChild(el);
 
-  r = { id, color, marker, arrow, head, hrEl: el.querySelector(".hr"), peersEl: el.querySelector(".peers"), uwb: {}, hrAt: 0, mic: el.querySelector(".mic"), trail, pathN: 0, pathLast: null, cloud, ptsN: 0, ptsHead: 0,
+  r = { id, color, marker, arrow, head, hrEl: el.querySelector(".hr"), peersEl: el.querySelector(".peers"), uwb: {}, hrAt: 0, mic: el.querySelector(".mic"), trail, mapPath, cloud, ptsN: 0, ptsHead: 0,
         img: el.querySelector("img"), meta: el.querySelector(".meta"), imgURL: null,
         canvas: el.querySelector("canvas"), feed: el, decoder: null, videoTimes: [], mapLag: null,
         pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0, patches, patchN: 0, patchByF: new Map() };
@@ -130,20 +127,29 @@ function onPose(d) {
   r.poseTimes.push(now);
   while (r.poseTimes.length && now - r.poseTimes[0] > 2000) r.poseTimes.shift();
 
-  addPathPoint(r, _p.x, _p.z);
+  addPathPoint(r.trail, _p.x, _p.z);
 }
 
-function addPathPoint(r, x, z) {
-  const L = r.pathLast;
-  if (L && Math.hypot(x - L.x, z - L.z) < PATH_STEP) return;
-  if (r.pathN >= PATH_CAP) return;
-  const arr = r.trail.geometry.attributes.position;
-  arr.setXYZ(r.pathN, x, 0.02, z);
-  arr.addUpdateRange(r.pathN * 3, 3);
+function makePath(color) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(PATH_CAP * 3), 3));
+  geo.setDrawRange(0, 0);
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+  line.frustumCulled = false;
+  scene.add(line);
+  return { line, n: 0, last: null };
+}
+function clearPath(p) { p.n = 0; p.last = null; p.line.geometry.setDrawRange(0, 0); }
+function addPathPoint(p, x, z) {
+  if (p.last && Math.hypot(x - p.last.x, z - p.last.z) < PATH_STEP) return;
+  if (p.n >= PATH_CAP) return;
+  const arr = p.line.geometry.attributes.position;
+  arr.setXYZ(p.n, x, 0.02, z);
+  arr.addUpdateRange(p.n * 3, 3);
   arr.needsUpdate = true;
-  r.pathN++;
-  r.pathLast = { x, z };
-  r.trail.geometry.setDrawRange(0, r.pathN);
+  p.n++;
+  p.last = { x, z };
+  p.line.geometry.setDrawRange(0, p.n);
 }
 
 function onJpeg(id, payload) {
@@ -260,7 +266,7 @@ function clearMap() {                                  // relay started a new ma
     for (const o of r.patches.children) { o.geometry.dispose(); o.material.map?.dispose(); o.material.dispose(); }
     r.patches.clear(); r.patchN = 0; r.patchByF.clear();
     r.ptsN = r.ptsHead = 0; r.cloud.geometry.setDrawRange(0, 0);
-    r.pathN = 0; r.pathLast = null; r.trail.geometry.setDrawRange(0, 0);
+    clearPath(r.trail); clearPath(r.mapPath);
   }
 }
 
@@ -386,10 +392,10 @@ function connect() {
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       const d = JSON.parse(ev.data);
-      handlers[d.t]?.(d);
+      if (!replaying || d.t === "recording") handlers[d.t]?.(d);
       return;
     }
-    onBinary(new Uint8Array(ev.data));
+    if (!replaying) onBinary(new Uint8Array(ev.data));   // a replay owns the markers, paths and feeds
   };
 }
 connect();
@@ -549,13 +555,13 @@ async function playMap(name, mode, btn) {
     btn.disabled = true;
     clearEnhanced();
     const td = new TextDecoder();
-    for (const r of responders.values()) { r.pathN = 0; r.pathLast = null; r.trail.geometry.setDrawRange(0, 0); }   // paths come from the file
+    for (const r of responders.values()) clearPath(r.mapPath);   // paths come from the file
     try {
       for await (const r of records(name, onProgress)) {             // draws as the file arrives
         recEl.textContent = `loading "${label2}" ${progress}`;
         if (!r.text) { if (r.body[0] === 2 || r.body[0] === 5) await onBinary(r.body); continue; }
         const d = JSON.parse(td.decode(r.body));
-        if (d.t === "pose") { _m.fromArray(d.T); addPathPoint(responder(d.id), _m.elements[12], _m.elements[14]); }   // walked path
+        if (d.t === "pose") { _m.fromArray(d.T); addPathPoint(responder(d.id).mapPath, _m.elements[12], _m.elements[14]); }   // walked path
       }
     } catch (err) { recEl.textContent = `load failed: ${err.message}`; btn.disabled = false; return; }
     btn.disabled = false;
