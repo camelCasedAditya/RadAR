@@ -36,6 +36,14 @@ python server/relay/relay.py --gpu ws://localhost:8010/stream
 ```
 Open http://localhost:8000. The status strip says "GPU … fps" once the worker is connected. Phones and Mac must be on the same network (a phone hotspot works).
 
+**Alternative: everything on the pod, no hotspot.** The relay and hub can run on the pod itself next to the worker, reachable through RunPod's HTTP proxy from any network (phones on cellular work). RunPod exposes only Jupyter's port 8888 on this pod, so Jupyter is stopped and the relay takes its port:
+```bash
+ssh -p <port> root@<ip> 'mkdir -p /workspace/radar/server/relay /workspace/radar/hub'
+scp -P <port> server/relay/*.py root@<ip>:/workspace/radar/server/relay/ && scp -P <port> hub/* root@<ip>:/workspace/radar/hub/
+ssh -p <port> root@<ip> 'pkill -f "[j]upyter-lab"; cd /workspace/radar && nohup python server/relay/relay.py --port 8888 --gpu ws://127.0.0.1:8010/stream > /workspace/relay.log 2>&1 < /dev/null &'
+```
+Hub: `https://<pod-id>-8888.proxy.runpod.net`. Phones: `wss://<pod-id>-8888.proxy.runpod.net`. No tunnel and no Mac relay needed. Costs the round trip to the pod in map lag, and each phone uploads ~3 Mbit/s video plus ~8 Mbit/s LiDAR depth, so two phones on cellular may need the depth compressed. The pod runs a copy of the files, not a git checkout: re-copy and restart (`pkill -f "[r]elay.py --port 8888"`) after edits.
+
 **4. Phones.** Build `RadAR.xcodeproj` to each phone (set your signing team). Enter `ws://<mac-ip>:8000` and a responder ID (`A`, `B`). Both responders stand on the same floor mark facing the same wall and tap Start. The hub shows 30 fps video right away; the 3D cloud appears after about half a metre of walking and trails you by a few seconds (shown as "map lag").
 
 The relay sends each phone's frames to the worker as stream `radar-<id>`, unprojects the returned depth, and aligns it to ARKit's metric frame (`server/relay/gpu_link.py`, `align.py`). `--conf` sets the depth-confidence cut (default 1.5).

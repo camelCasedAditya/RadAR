@@ -26,6 +26,12 @@
   #controls { position:absolute; top:8px; right:10px; display:flex; gap:6px; }
   button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font:inherit; cursor:pointer; }
   button[aria-pressed="true"] { border-color:var(--text); }
+  #qr { position:absolute; top:44px; right:10px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; display:flex; flex-direction:column; gap:8px; align-items:center; max-width:300px; }
+  #qr p { margin:0; color:var(--dim); }
+  #qr-ids { display:flex; gap:6px; }
+  #qr-img { background:#fff; padding:10px; border-radius:4px; line-height:0; }
+  #qr-img svg { width:220px; height:220px; }
+  #qr-url { word-break:break-all; color:var(--dim); }
   @media (max-width:760px) {
     #app { grid-template-columns:1fr; grid-template-rows:55vh auto auto; }
     #side { grid-row:3; grid-column:1; border-left:0; border-top:1px solid var(--line); }
@@ -42,11 +48,18 @@
 <div id="app">
   <div id="view">
     <div id="conn">connecting…</div>
-    <div id="controls"><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
+    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
+    <div id="qr" hidden>
+      <p>Scan in the RadAR app (Scan button). Pick the responder ID first:</p>
+      <div id="qr-ids"><button data-id="A" aria-pressed="true">A</button><button data-id="B" aria-pressed="false">B</button><button data-id="C" aria-pressed="false">C</button><button data-id="" aria-pressed="false">no ID</button></div>
+      <div id="qr-img"></div>
+      <code id="qr-url"></code>
+    </div>
   </div>
   <aside id="side"></aside>
   <div id="status"></div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -40,9 +40,10 @@ def walk(noise):
 # 1. exact lingbot poses: points sit on the walls (float16 depth quantisation is a few mm)
 link, worst, frames, pts, _ = walk(noise=0.0)
 assert frames > 300 and worst < 0.02, (frames, worst)
-# voxel dedup: never more than one point per voxel
+# voxel dedup: a seen CELL holds at most the (CELL/VOXEL)^3 VOXEL points one frame can put in it
+from gpu_link import CELL
 keys = link.seen
-assert pts == len(keys), (pts, len(keys))
+assert len(keys) <= pts <= round(CELL / VOXEL) ** 3 * len(keys), (pts, len(keys))
 
 # 2. lingbot pose wobbles by ~3 deg / ~3 cm per frame. Old lingbot-pose placement: p95 15 cm, worst 116 cm.
 #    ARKit placement only takes lingbot's (smoothed) scale, so walls stay within a few cm.
@@ -96,4 +97,23 @@ assert abs(xyz[:, 1].mean() - 1.4) < 0.2, "wall centred at camera height"
 assert ll.handle_lidar("P", 1, payload) is None, "same view again adds nothing"
 assert ll.handle_lidar("P", 2, payload) is None, "no pose for frame 2 -> skipped"
 assert ll.stats["P"]["lidar"] == 3 and ll.stats["P"]["skip_nopose"] == 1
-print("lidar ok")
+
+# 6. guided upsampling: a depth step that lines up with an image edge stays sharp at image resolution
+from gpu_link import upsample_depth
+import time
+guide = np.zeros((392, 518, 3), np.uint8); guide[:, :259] = 200; guide[:, 259:] = 40        # bright | dark
+depth2 = np.full((DH, DW), 2.0, np.float32); depth2[:, DW // 2:] = 3.0                       # near | far
+conf2 = np.full((DH, DW), 2, np.uint8)
+t0 = time.time(); up, ok2 = upsample_depth(depth2, conf2, guide); dt = time.time() - t0
+assert up.shape == (392, 518) and ok2.mean() > 0.95
+mid = np.abs(up[:, 250:268] - 2.5) < 0.4                     # blended pixels would sit between 2 and 3
+assert mid.mean() < 0.02, f"{mid.mean():.3f} of the pixels at the edge are blended"
+assert abs(up[:, :250] - 2).max() < 1e-3 and abs(up[:, 268:] - 3).max() < 1e-3
+# whole LiDAR frame budget: two phones at 4 fps leaves ~120 ms per frame on one core
+ll2 = GpuLink("unused", None, None)
+depth3 = (2.0 + 0.3 * np.sin(np.arange(DW) / 9))[None, :].repeat(DH, 0).astype(np.float32)   # wavy wall: few duplicate voxels
+payload3 = struct.pack("<HH", DW, DH) + depth3.tobytes() + np.full((DH, DW), 2, np.uint8).tobytes() + fake_jpeg("L", 0.5)
+ll2.remember_pose("P", 1, T0, K, None, (W, H))
+t0 = time.time(); out3 = ll2.handle_lidar("P", 1, payload3); dt3 = time.time() - t0
+assert out3 is not None and len(out3[2]) > 50_000, len(out3[2])
+print(f"lidar ok (upsample 256x192 -> 518x392 in {dt * 1000:.0f} ms; full frame {dt3 * 1000:.0f} ms -> {len(out3[2])} pts)")

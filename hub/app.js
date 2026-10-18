@@ -5,7 +5,7 @@ import { onVideo, videoSupported } from "./video.js";
 
 const COLORS = ["#3fa7ff", "#ff9f1c", "#2ec4b6", "#e84855"];
 let tintOn = false;                 // see the Tint button below
-const MAX_POINTS = 3_000_000;   // per responder; ring buffer wraps when full
+const MAX_POINTS = 6_000_000;   // per responder (90 MB); ring buffer wraps when full
 const TRAIL_SECONDS = 60;
 
 // ---------- scene ----------
@@ -71,7 +71,7 @@ function responder(id) {
   ptsGeo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(MAX_POINTS * 3), 3, true));
   ptsGeo.setDrawRange(0, 0);
   const cloud = new THREE.Points(ptsGeo, new THREE.PointsMaterial({
-    size: 0.022, vertexColors: !tintOn, color: tintOn ? color : 0xffffff,
+    size: 0.011, vertexColors: !tintOn, color: tintOn ? color : 0xffffff,   // = relay voxel size, so surfaces close up
     map: dotTexture, alphaTest: 0.5, transparent: false,   // round dots instead of squares
   }));
   cloud.frustumCulled = false;
@@ -136,11 +136,15 @@ function onPoints(id, payload) {
   const xyz = new Float32Array(payload.slice(4, 4 + n * 12).buffer);
   const rgb = payload.subarray(4 + n * 12, 4 + n * 15);
   const pos = r.cloud.geometry.attributes.position, col = r.cloud.geometry.attributes.color;
-  for (let i = 0; i < n; i++) {
-    const j = r.ptsHead;
-    pos.array[j * 3] = xyz[i * 3]; pos.array[j * 3 + 1] = xyz[i * 3 + 1]; pos.array[j * 3 + 2] = xyz[i * 3 + 2];
-    col.array[j * 3] = rgb[i * 3]; col.array[j * 3 + 1] = rgb[i * 3 + 1]; col.array[j * 3 + 2] = rgb[i * 3 + 2];
-    r.ptsHead = (j + 1) % MAX_POINTS;
+  // copy in at most two slices (ring wrap) and upload only those slices, not the whole 90 MB buffer
+  for (let done = 0; done < n;) {
+    const j = r.ptsHead, k = Math.min(n - done, MAX_POINTS - j);
+    pos.array.set(xyz.subarray(done * 3, (done + k) * 3), j * 3);
+    col.array.set(rgb.subarray(done * 3, (done + k) * 3), j * 3);
+    pos.addUpdateRange(j * 3, k * 3);
+    col.addUpdateRange(j * 3, k * 3);
+    r.ptsHead = (j + k) % MAX_POINTS;
+    done += k;
   }
   r.ptsN = Math.min(MAX_POINTS, r.ptsN + n);
   pos.needsUpdate = col.needsUpdate = true;
@@ -200,6 +204,26 @@ tintBtn.onclick = () => {
     r.cloud.material.color.set(tintOn ? r.color : 0xffffff);
     r.cloud.material.needsUpdate = true;
   }
+};
+
+// Connect: QR code of this relay's phone URL (+ "#ID"), scanned by the app's Scan button.
+const qrBox = document.getElementById("qr"), connectBtn = document.getElementById("connect");
+let qrId = "A";
+function drawQR() {
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${qrId ? "#" + qrId : ""}`;
+  const q = qrcode(0, "M"); q.addData(url); q.make();      // qrcode-generator, loaded in index.html
+  document.getElementById("qr-img").innerHTML = q.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+  document.getElementById("qr-url").textContent = url;
+}
+connectBtn.onclick = () => {
+  qrBox.hidden = !qrBox.hidden;
+  connectBtn.setAttribute("aria-pressed", !qrBox.hidden);
+  if (!qrBox.hidden) drawQR();
+};
+for (const b of document.querySelectorAll("#qr-ids button")) b.onclick = () => {
+  qrId = b.dataset.id;
+  for (const o of document.querySelectorAll("#qr-ids button")) o.setAttribute("aria-pressed", o === b);
+  drawQR();
 };
 
 const followBtn = document.getElementById("follow");

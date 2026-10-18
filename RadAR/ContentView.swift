@@ -1,6 +1,7 @@
 import ARKit
 import SceneKit
 import SwiftUI
+import VisionKit
 
 struct ContentView: View {
     @AppStorage("relayURL") private var relayURL = "ws://192.168.1.10:8000"
@@ -8,14 +9,19 @@ struct ContentView: View {
     @State private var running = false
     @State private var status = "idle"
     @State private var streamer = Streamer()
+    @State private var scanning = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
             ARPreview(session: streamer.session).ignoresSafeArea()
             VStack(alignment: .leading, spacing: 10) {
                 if !running {
-                    TextField("Relay URL", text: $relayURL)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    HStack {
+                        TextField("Relay URL", text: $relayURL)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                        Button("Scan") { scanning = true }      // QR from the hub's Connect button
+                            .disabled(!DataScannerViewController.isSupported)
+                    }
                     TextField("Responder ID", text: $responderID)
                         .textInputAutocapitalization(.characters).autocorrectionDisabled()
                     Text("Stand on the start mark facing the marked wall, then tap Start.")
@@ -32,6 +38,16 @@ struct ContentView: View {
             .padding()
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             .padding()
+        }
+        .sheet(isPresented: $scanning) {
+            QRScanner { text in
+                // hub encodes ws(s)://host[#ID]
+                guard var c = URLComponents(string: text), c.scheme?.hasPrefix("ws") == true else { return }
+                if let id = c.fragment, !id.isEmpty { responderID = id }
+                c.fragment = nil
+                relayURL = c.string ?? text
+                scanning = false
+            }
         }
     }
 
@@ -61,6 +77,26 @@ struct ARPreview: UIViewRepresentable {
         return v
     }
     func updateUIView(_ uiView: ARSCNView, context: Context) {}
+}
+
+/// Full-screen QR scanner (VisionKit). Calls `found` with the first QR payload seen.
+struct QRScanner: UIViewControllerRepresentable {
+    let found: (String) -> Void
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let v = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])], isHighlightingEnabled: true)
+        v.delegate = context.coordinator
+        try? v.startScanning()
+        return v
+    }
+    func updateUIViewController(_ v: DataScannerViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(found: found) }
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let found: (String) -> Void
+        init(found: @escaping (String) -> Void) { self.found = found }
+        func dataScanner(_ s: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
+            for case .barcode(let b) in items { if let p = b.payloadStringValue { found(p); return } }
+        }
+    }
 }
 
 #Preview {

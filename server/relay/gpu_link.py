@@ -31,7 +31,8 @@ LOST_AFTER = 5.0             # s before an unanswered frame is written off
 # ponytail: fixed quality knobs; tune on site (watch the hub for floaters vs holes).
 SCALE_SMOOTH = 0.05          # EMA weight of each new lingbot->metres scale estimate within a segment
 MAX_DEPTH = 4.0              # m; lingbot depth is least reliable far away
-VOXEL = 0.02                 # m; one point kept per cube, shared by all phones (~pixel spacing at 3 m with depth stride 3)
+VOXEL = 0.01                 # m; point spacing: one point per cube within a frame
+CELL = 0.04                  # m; a cell is closed to later frames once any frame put a point in it (see place)
 MIN_BRIGHTNESS = 12          # mean grey level below which a map frame is treated as a dead camera
 LIDAR_CONF = 2               # ARKit depth confidence to keep (0 low, 1 medium, 2 high)
 
@@ -100,13 +101,50 @@ def scale_from_features(h, depth, conf, fp, conf_min, min_points=8):
     return med if 0.05 < med < 50 else None
 
 
+def upsample_depth(depth, conf, guide, sigma_s=0.7, sigma_r=10.0, sigma_d=0.01):
+    """Joint bilateral upsampling of LiDAR depth onto the (finer) map image grid: each image pixel
+    averages the 3x3 nearest depth samples, weighted by distance, by how alike the image looks
+    there (depth edges follow image edges) and by closeness to the nearest sample's depth (no
+    blending across a depth step). -> depth at image resolution, and a mask of pixels with enough
+    confident, similar samples behind them."""
+    lh, lw = depth.shape
+    H, W = guide.shape[:2]
+    g = np.asarray(Image.fromarray(guide).convert("L"), np.float32)
+    g_lo = np.asarray(Image.fromarray(g.astype(np.uint8)).resize((lw, lh), Image.BOX), np.float32)
+    ys = ((np.arange(H) + 0.5) * lh / H - 0.5).astype(np.float32)
+    xs = ((np.arange(W) + 0.5) * lw / W - 0.5).astype(np.float32)
+    y0, x0 = np.round(ys).astype(int), np.round(xs).astype(int)
+    fy, fx = ys - y0, xs - x0
+    depth = np.where((conf >= LIDAR_CONF) & (depth > 0), depth, 0).astype(np.float32)   # 0 = no sample
+    d0 = depth[np.clip(y0, 0, lh - 1)[:, None], np.clip(x0, 0, lw - 1)[None, :]]
+    has0 = d0 > 0                                          # no confident nearest sample -> pixel gets no depth
+    inv_d = np.float32(-0.5) / np.where(has0, sigma_d * d0, 1) ** 2   # per-pixel depth gate
+    num = np.zeros((H, W), np.float32)
+    den = np.zeros((H, W), np.float32)
+    for dy in (-1, 0, 1):
+        yy = np.clip(y0 + dy, 0, lh - 1)[:, None]
+        wy = np.exp(-(dy - fy) ** 2 / (2 * sigma_s ** 2))[:, None]
+        for dx in (-1, 0, 1):
+            xx = np.clip(x0 + dx, 0, lw - 1)[None, :]
+            wx = np.exp(-(dx - fx) ** 2 / (2 * sigma_s ** 2))[None, :]
+            d = depth[yy, xx]
+            e = (g - g_lo[yy, xx]) ** 2 * np.float32(-0.5 / sigma_r ** 2)
+            e += (d - d0) ** 2 * inv_d
+            w = np.exp(e, out=e)
+            w *= wy * wx
+            w *= (d > 0) & has0
+            num += w * d
+            den += w
+    return num / np.maximum(den, 1e-6), den > 0.3
+
+
 def voxel_keys(pts, size=VOXEL):
-    q = np.floor(pts / size).astype(np.int64) + (1 << 20)        # +-40 km at 4 cm
+    q = np.floor(pts / size).astype(np.int64) + (1 << 20)        # +-10 km at 1 cm
     return (q[:, 0] << 42) | (q[:, 1] << 21) | q[:, 2]
 
 
 class GpuLink:
-    def __init__(self, url, on_points, on_status, conf_min=2.0, max_points=40_000, queue_cap=15):
+    def __init__(self, url, on_points, on_status, conf_min=2.0, max_points=200_000, queue_cap=15):
         self.url, self.on_points, self.on_status = url, on_points, on_status
         self.conf_min, self.max_points = conf_min, max_points
         self.ws = None
@@ -122,7 +160,7 @@ class GpuLink:
         self.last_print = 0.0
         self.poses: dict[str, dict[int, tuple]] = {}     # rid -> {frame id: (ARKit T, K or None)}
         self.scale: dict[str, float] = {}                # rid -> smoothed lingbot->metres scale
-        self.seen: set[int] = set()                      # occupied voxels, all phones
+        self.seen: set[int] = set()                      # occupied voxels, all phones. ponytail: ~70 B each in a Python set, ~1 GB at 15M points; move to a numpy hash if sessions run long
         self.aligners: dict[str, Aligner] = {}
         self.segments: dict[str, int] = {}
 
@@ -277,10 +315,11 @@ class GpuLink:
         n = dw * dh
         depth = np.frombuffer(payload, "<f4", n, offset=4).reshape(dh, dw)
         conf = np.frombuffer(payload, np.uint8, n, offset=4 + 4 * n).reshape(dh, dw)
-        rgb = np.asarray(Image.open(io.BytesIO(payload[4 + 5 * n:])).convert("RGB").resize((dw, dh)))
-        fx, fy, cx, cy = K[0] * dw / w, K[1] * dh / h, K[2] * dw / w, K[3] * dh / h   # lens for the depth grid
-        v, u = np.mgrid[0:dh, 0:dw]
-        keep = (conf >= LIDAR_CONF) & (depth > 0)
+        rgb = np.asarray(Image.open(io.BytesIO(payload[4 + 5 * n:])).convert("RGB"))
+        depth, keep = upsample_depth(depth, conf, rgb)            # depth at the image's resolution
+        ih, iw = depth.shape
+        fx, fy, cx, cy = K[0] * iw / w, K[1] * ih / h, K[2] * iw / w, K[3] * ih / h   # lens for that grid
+        v, u = np.mgrid[0:ih, 0:iw]
         z = depth[keep]
         cam = np.stack([(u[keep] - cx) / fx * z, (v[keep] - cy) / fy * z, z], 1)
         return self.place(rid, f, cam, rgb[keep], T)
@@ -292,16 +331,22 @@ class GpuLink:
         xyz = (cam[near] @ (Ra @ F).T + pa).astype(np.float32)   # placed with ARKit's own pose
         col = col[near]
         keys = voxel_keys(xyz)
-        _, first = np.unique(keys, return_index=True)   # one point per voxel within the frame
-        fresh = np.array([i for i in first if keys[i] not in self.seen], dtype=np.int64)
+        _, first = np.unique(keys, return_index=True)   # one point per VOXEL within the frame
+        # Across frames a CELL is closed once a frame put a point in it: a new area fills at VOXEL
+        # spacing from its first view, but re-observations (LiDAR depth + pose noise, a few cm) cannot
+        # keep layering the same surface, which is what filled the hub's buffer in minutes.
+        # ponytail: CELL is a plain noise threshold; a proper fix is fusing depth over time (TSDF).
+        kf = voxel_keys(xyz[first], CELL)
+        dup = self.seen.intersection(kf.tolist())          # C-speed set lookup instead of a Python loop
+        fresh = first if not dup else first[~np.isin(kf, np.fromiter(dup, np.int64, len(dup)))]
         if not len(fresh):
             self.count(rid, "all_seen")
             return None
-        self.seen.update(keys[fresh].tolist())
         xyz, col = xyz[fresh], col[fresh]
         if len(xyz) > self.max_points:
             idx = np.random.default_rng(seq).choice(len(xyz), self.max_points, replace=False)
             xyz, col = xyz[idx], col[idx]
+        self.seen.update(voxel_keys(xyz, CELL).tolist())    # only what is actually shown closes cells
         self.count(rid, "pts", len(xyz))
         return rid, seq, xyz, col
 
