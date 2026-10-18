@@ -30,8 +30,10 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     // lingbot-map is a streaming VIDEO model: each frame leans on the frames just before it, so it
     // needs a steady, overlapping stream (its demos use 10 fps). Sparse "only when moved 30 cm" input
     // collapsed its depth confidence. So: a fixed rate while moving, 1 fps when still.
-    // ponytail: 6 fps suits one phone on an A40 (~9 frames/s total through the tunnel); use 4 for two phones.
-    static let mapFps: Double = 6
+    // ponytail: the GPU path returns ~10 frames/s total through the hotspot tunnel (2 in flight per phone
+    // x ~0.4 s round trip), so 4 fps per phone keeps two phones from backing up. Voxel merging on the
+    // relay means 4 vs 6 fps barely changes map density at walking pace.
+    static let mapFps: Double = 4
     static let mapMove: Float = 0.02         // "still" = under 2 cm and 1 degree since the last map frame
     static let mapTurn: Float = 1 * .pi / 180
     static let mapFloor: TimeInterval = 1    // at least one map frame per second even when still

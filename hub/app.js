@@ -4,6 +4,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { onVideo, videoSupported } from "./video.js";
 
 const COLORS = ["#3fa7ff", "#ff9f1c", "#2ec4b6", "#e84855"];
+let tintOn = false;                 // see the Tint button below
 const MAX_POINTS = 3_000_000;   // per responder; ring buffer wraps when full
 const TRAIL_SECONDS = 60;
 
@@ -60,7 +61,7 @@ function responder(id) {
   ptsGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_POINTS * 3), 3));
   ptsGeo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(MAX_POINTS * 3), 3, true));
   ptsGeo.setDrawRange(0, 0);
-  const cloud = new THREE.Points(ptsGeo, new THREE.PointsMaterial({ size: 0.04, vertexColors: true }));
+  const cloud = new THREE.Points(ptsGeo, new THREE.PointsMaterial({ size: 0.04, vertexColors: !tintOn, color: tintOn ? color : 0xffffff }));
   cloud.frustumCulled = false;
   scene.add(cloud);
 
@@ -174,7 +175,21 @@ function connect() {
 }
 connect();
 
-// ---------- follow + status ----------
+// ---------- tint + follow + status ----------
+// Tint: colour each responder's points with their marker colour instead of camera colour,
+// so you can see which phone mapped what and how the two clouds stitch together.
+const tintBtn = document.getElementById("tint");
+tintBtn.onclick = () => {
+  tintOn = !tintOn;
+  tintBtn.textContent = `Tint: ${tintOn ? "by responder" : "off"}`;
+  tintBtn.setAttribute("aria-pressed", tintOn);
+  for (const r of responders.values()) {
+    r.cloud.material.vertexColors = !tintOn;
+    r.cloud.material.color.set(tintOn ? r.color : 0xffffff);
+    r.cloud.material.needsUpdate = true;
+  }
+};
+
 const followBtn = document.getElementById("follow");
 let followIdx = -1;
 followBtn.onclick = () => {
