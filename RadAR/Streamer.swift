@@ -48,6 +48,11 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         }
         let cfg = ARWorldTrackingConfiguration()
         cfg.worldAlignment = .gravity
+        // LiDAR phones (Pro): metric scene depth rides along with each map frame and the relay maps
+        // from it directly, no GPU. Other phones keep sending plain JPEGs for lingbot.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            cfg.frameSemantics.insert(.smoothedSceneDepth)
+        }
         session.delegateQueue = queue
         session.delegate = self
         session.run(cfg, options: [.resetTracking, .removeExistingAnchors])
@@ -118,19 +123,27 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         frameId &+= 1
         let f = frameId
         let T = frame.camera.transform
-        send(.string(Wire.pose(frame: f, ts: frame.timestamp, T: T, K: K, w: Self.width, h: h)), on: ws)
+        let mapFrame = isMapFrame(T, at: frame.timestamp) && pending < 30
+        // ARKit's tracked feature points carry metric depth; the relay reads lingbot's depth at the same
+        // pixels to get the map scale per frame (no camera travel needed). Only with map frames: ~300 x 3 numbers.
+        let fp: [[Float]] = mapFrame ? Self.featurePoints(frame, K: K, w: Self.width, h: h) : []
+        send(.string(Wire.pose(frame: f, ts: frame.timestamp, T: T, K: K, w: Self.width, h: h, fp: fp)), on: ws)
 
         if pending > 30 { dropping = true }          // ~1 s of sends backed up
         if !dropping || pending < 5 {
             encoder.encode(frame.capturedImage, time: frame.timestamp, frame: f)
         }
 
-        if isMapFrame(T, at: frame.timestamp), pending < 30 {
+        if mapFrame {
             lastMap = (frame.timestamp, T)
             let img = CIImage(cvPixelBuffer: frame.capturedImage).transformed(by: CGAffineTransform(scaleX: sx, y: sy))
             if let jpeg = ci.jpegRepresentation(of: img, colorSpace: sRGB,
                                                 options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.6]) {
-                send(.data(Wire.jpegFrame(id: rid, frame: f, jpeg: jpeg)), on: ws)
+                if let d = frame.smoothedSceneDepth, let m = Wire.depthFrame(id: rid, frame: f, depth: d, jpeg: jpeg) {
+                    send(.data(m), on: ws)
+                } else {
+                    send(.data(Wire.jpegFrame(id: rid, frame: f, jpeg: jpeg)), on: ws)
+                }
                 mapTimes.append(frame.timestamp)
             }
         }
@@ -139,6 +152,23 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         mapTimes.removeAll { frame.timestamp - $0 > 2 }
         onStatus?("\(link) · video \(videoTimes.count / 2) fps · map \(mapTimes.count / 2) fps · tracking \(tracking)"
                   + (lastError.isEmpty ? "" : "\nlast drop: \(lastError)"))
+    }
+
+    /// Feature points projected into the map image: [u, v, depth] with depth in metres along the camera axis.
+    private static func featurePoints(_ frame: ARFrame, K: [Float], w: Int, h: Int) -> [[Float]] {
+        guard let pts = frame.rawFeaturePoints?.points, !pts.isEmpty else { return [] }
+        let w2c = frame.camera.transform.inverse
+        var out: [[Float]] = []
+        out.reserveCapacity(min(pts.count, 300))
+        for p in pts.prefix(300) {
+            let c = w2c * simd_float4(p, 1)
+            let z = -c.z                                   // ARKit camera looks down -Z
+            guard z > 0.2, z < 8 else { continue }
+            let u = K[0] * c.x / z + K[2], v = K[1] * (-c.y) / z + K[3]   // OpenCV image axes (y down)
+            guard u >= 0, u < Float(w), v >= 0, v < Float(h) else { continue }
+            out.append([u, v, z])
+        }
+        return out
     }
 
     /// Time for the next map frame: at mapFps while the phone is moving at all, 1 fps when still.

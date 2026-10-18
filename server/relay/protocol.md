@@ -17,7 +17,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 | `t` | Fields | Source | Notes |
 |---|---|---|---|
 | `hello` | `name` | phone | once on connect |
-| `pose` | `f` (frame id, int), `ts` (s, float), `T` (16 floats, column-major 4×4 camera-to-world, metres, ARKit axes: +Y up), `K` ([fx, fy, cx, cy] for the 518-wide map image), `w`, `h` | phone | every camera frame (30 Hz). Map JPEGs and video frames reuse the same `f` |
+| `pose` | `f` (frame id, int), `ts` (s, float), `T` (16 floats, column-major 4×4 camera-to-world, metres, ARKit axes: +Y up), `K` ([fx, fy, cx, cy] for the 518-wide map image), `w`, `h`, `fp` (map frames only: ARKit feature points as [u, v, z] pixels in the map image + metric depth, ≤300; the relay reads lingbot depth at these pixels for a per-frame metric scale) | phone | every camera frame (30 Hz). Map JPEGs and video frames reuse the same `f` |
 | `head` | `yaw`, `pitch` (radians, relative to Start) | phone | Module A |
 | `uwb` | `peer`, `distance` (m), `direction` ([x,y,z] or null) | phone | Module C |
 | `gps` | `lat`, `lon`, `heading` | phone | Module D |
@@ -30,7 +30,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 ## Binary messages
 
 ```
-byte 0      kind     1 = jpeg, 2 = points, 3 = h264
+byte 0      kind     1 = jpeg, 2 = points, 3 = h264, 4 = depth
 byte 1      idlen
 bytes 2..   id       (idlen bytes, utf-8)
 next 4      f        uint32 little-endian frame id
@@ -40,5 +40,6 @@ rest        payload
 - kind 1 payload (**map frame**): JPEG bytes, a steady 4 fps while the phone moves (lingbot-map is a streaming video model and needs overlapping frames), 1 fps when still. Camera sensor orientation (landscape, unrotated, matching ARKit's camera transform), width 518, height a multiple of 14 (392 for iPhone's 4:3 camera). Phone must set `id` itself.
 - kind 2 payload: `n` uint32 LE, then `n*3` float32 LE xyz (metres, ARKit frame), then `n*3` uint8 rgb. Sent by the relay after aligning the worker's depth.
 - kind 3 payload (**live video**, 30 fps): `flags` u8 (bit 0 = keyframe), then one H.264 access unit in Annex-B form (start codes). Keyframes carry SPS and PPS first. Same sensor orientation as kind 1. Relay forwards it untouched and replays the latest keyframe group to hubs that connect late.
+- kind 4 payload (**LiDAR map frame**, iPhone Pro only, sent *instead of* kind 1): `w` u16 LE, `h` u16 LE (ARKit scene depth grid, 256×192), `w*h` float32 LE depth in metres, `w*h` uint8 ARKit confidence (0 low, 1 medium, 2 high), then the map JPEG as in kind 1. Relay keeps high-confidence pixels, colours them from the JPEG, and places them with the `pose` of the same `f`; no GPU involved.
 
 Helpers: `server/relay/wire.py` (`pack_bin`, `unpack_bin`, `pack_points`, `unpack_points`).

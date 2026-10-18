@@ -56,6 +56,20 @@ link.remember_pose("A", 5000, T, K)
 again = link.handle_result(result_msg("radar-A", 5000, 1, 5000, T))
 assert again is None or len(again[2]) < 50, len(again[2])
 
+# 3b. feature points give the metric scale on the very first frame, standing still, and survive a new segment
+from fake_worker import S, feature_points
+fpl = GpuLink("unused", None, None)
+still = pose_T(2, 0, 0)
+for f in range(3):
+    fpl.remember_pose("F", f, still, K, feature_points(still, seed=f))
+    out = fpl.handle_result(result_msg("radar-F", f, 1 + (f == 2), f, still))   # segment changes on the 3rd frame
+    assert abs(fpl.scale["F"] * S - 1) < 0.02, fpl.scale["F"]                  # right scale every frame, no travel
+    if f == 0:
+        assert out is not None and len(out[2]) > 100 and wall_error(out[2].astype(float)).max() < 0.03
+    else:
+        assert out is None or len(out[2]) < 50                                 # same view: voxels already mapped
+assert fpl.stats["F"]["fp_scale"] == 3 and fpl.stats["F"]["short_travel"] == 0
+
 # 4. a new segment (worker re-seeded lingbot) keeps working; frames with no ARKit pose are skipped
 link.remember_pose("A", 9999, pose_T(0, 0, 0), K)
 link.handle_result(result_msg("radar-A", 9999, 2, 0, pose_T(0, 0, 0)))
@@ -63,3 +77,23 @@ assert link.aligners["A"].sim is None and len(link.aligners["A"].buf) == 1 and "
 assert link.handle_result(result_msg("radar-B", 5, 1, 5, pose_T(0, 0, 0))) is None
 print(f"link ok: {frames} frames, {pts} points (1 per {VOXEL * 100:.0f} cm voxel), "
       f"worst wall error {worst * 1000:.1f} mm exact; with 3 deg lingbot wobble p95 {p95_noisy * 100:.1f} cm, worst {worst_noisy * 100:.1f} cm")
+
+# 5. LiDAR frame: metric ARKit depth placed with the pose alone, no GPU, no scale learning
+import struct
+from session import fake_jpeg
+DW, DH = 256, 192
+depth = np.full((DH, DW), 2.0, np.float32)                       # flat wall 2 m ahead
+conf = np.full((DH, DW), 2, np.uint8); conf[:, :DW // 2] = 1     # left half low confidence: dropped
+payload = struct.pack("<HH", DW, DH) + depth.tobytes() + conf.tobytes() + fake_jpeg("L", 0.5)
+ll = GpuLink("unused", None, None)
+T0 = pose_T(0, 0, 0)                                              # at the origin, 1.4 m up, looking -Z
+ll.remember_pose("P", 1, T0, K, None, (W, H))
+rid, seq, xyz, rgb = ll.handle_lidar("P", 1, payload)
+assert rid == "P" and seq == 1 and len(xyz) == len(rgb) > 1000
+assert abs(xyz[:, 2] + 2).max() < 1e-3, "wall must sit at z = -2 m"
+assert xyz[:, 0].min() > -0.05, "low-confidence left half (negative x) must be dropped"
+assert abs(xyz[:, 1].mean() - 1.4) < 0.2, "wall centred at camera height"
+assert ll.handle_lidar("P", 1, payload) is None, "same view again adds nothing"
+assert ll.handle_lidar("P", 2, payload) is None, "no pose for frame 2 -> skipped"
+assert ll.stats["P"]["lidar"] == 3 and ll.stats["P"]["skip_nopose"] == 1
+print("lidar ok")

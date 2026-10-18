@@ -156,7 +156,7 @@ const handlers = {
   gpu: (d) => { gpu = { ...d, at: performance.now() }; },
   maplag: (d) => { responder(d.id).mapLag = d; },
 };   // add-on modules register more types here
-window.radar = { scene, responders, responder, handlers, THREE };
+window.radar = { scene, responders, responder, handlers, THREE, camera, controls };
 
 function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/hub`);

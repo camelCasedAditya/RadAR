@@ -14,7 +14,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from gpu_link import GpuLink
-from wire import KIND_H264, KIND_JPEG, KIND_POINTS, pack_bin, pack_points, unpack_bin
+from wire import KIND_DEPTH, KIND_H264, KIND_JPEG, KIND_POINTS, pack_bin, pack_points, unpack_bin
 
 HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
 
@@ -46,10 +46,8 @@ def make_app(gpu_url=None, conf_min=2.0):
     @asynccontextmanager
     async def lifespan(_app):
         global link
-        task = None
-        if gpu_url:
-            link = GpuLink(gpu_url, on_points, on_status, conf_min=conf_min)
-            task = asyncio.create_task(link.run())
+        link = GpuLink(gpu_url, on_points, on_status, conf_min=conf_min)   # LiDAR phones map without a GPU
+        task = asyncio.create_task(link.run()) if gpu_url else None
         yield
         if task:
             task.cancel()
@@ -72,7 +70,7 @@ def make_app(gpu_url=None, conf_min=2.0):
                     if link and d["t"] == "hello":
                         await link.reset(rid)
                     elif link and d["t"] == "pose":
-                        link.remember_pose(rid, d["f"], d["T"], d.get("K"))
+                        link.remember_pose(rid, d["f"], d["T"], d.get("K"), d.get("fp"), (d.get("w", 518), d.get("h", 392)))
                 elif m.get("bytes") is not None:
                     b = m["bytes"]
                     kind, _, f, payload = unpack_bin(b)
@@ -81,6 +79,10 @@ def make_app(gpu_url=None, conf_min=2.0):
                         await send_hubs(b)
                         if link:
                             link.enqueue(rid, f, payload)
+                    elif kind == KIND_DEPTH:            # LiDAR phone: metric depth, placed here, no GPU
+                        out = await asyncio.to_thread(link.handle_lidar, rid, f, payload)
+                        if out:
+                            await on_points(*out, 0.0, 0)
                     elif kind == KIND_H264:
                         if payload[0] & 1:
                             gop[rid] = []

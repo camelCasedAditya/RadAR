@@ -56,6 +56,18 @@ def render(T16, noise=0.0, seed=0):
     return c2w, [fx, fx, cx, cy], np.where(seen, depth * S, 0), np.where(seen, 5.0, 0.0), rgb
 
 
+def feature_points(T16, n=60, seed=0):
+    """What the phone would send: [u, v, z_metres] for n random wall pixels visible from this pose."""
+    _, K, depth, conf, _ = render(T16)
+    fx, _, cx, cy = K
+    rng = np.random.default_rng(seed)
+    vs, us = np.nonzero(depth > 0)
+    if len(us) == 0:
+        return []
+    pick = rng.choice(len(us), min(n, len(us)), replace=False)
+    return [[float(us[i] * STRIDE), float(vs[i] * STRIDE), float(depth[vs[i], us[i]] / S)] for i in pick]
+
+
 def result_msg(stream, seq, segment, idx, T16, noise=0.0):
     c2w, K, depth, conf, rgb = render(T16, noise, seq)
     header = {"type": "result", "stream": stream, "seq": seq, "segment": segment, "frame_index": idx,

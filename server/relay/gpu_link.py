@@ -33,6 +33,7 @@ SCALE_SMOOTH = 0.05          # EMA weight of each new lingbot->metres scale esti
 MAX_DEPTH = 4.0              # m; lingbot depth is least reliable far away
 VOXEL = 0.02                 # m; one point kept per cube, shared by all phones (~pixel spacing at 3 m with depth stride 3)
 MIN_BRIGHTNESS = 12          # mean grey level below which a map frame is treated as a dead camera
+LIDAR_CONF = 2               # ARKit depth confidence to keep (0 low, 1 medium, 2 high)
 
 
 def pack(header: dict, payload: bytes = b"") -> bytes:
@@ -80,6 +81,25 @@ def is_dark(jpeg: bytes) -> bool:
         return False        # not decodable here; let the worker decide
 
 
+def scale_from_features(h, depth, conf, fp, conf_min, min_points=8):
+    """lingbot->metres scale from ARKit feature points [u, v, z_metres] in the 518-wide map image:
+    median of z_arkit / z_lingbot over confident pixels. None if too few usable points."""
+    if not fp or len(fp) < min_points:
+        return None
+    st = h["model_w"] / h["depth_w"]
+    a = np.asarray(fp, float)
+    u = np.clip((a[:, 0] / st).astype(int), 0, depth.shape[1] - 1)
+    v = np.clip((a[:, 1] / st).astype(int), 0, depth.shape[0] - 1)
+    dl, c = depth[v, u], conf[v, u]
+    ok = (dl > 0) & (c > conf_min) & (a[:, 2] > 0)
+    if ok.sum() < min_points:
+        return None
+    r = a[ok, 2] / dl[ok]
+    med = float(np.median(r))
+    # ponytail: plain median; features on edges/glass give outliers, trim to the middle half if it jitters
+    return med if 0.05 < med < 50 else None
+
+
 def voxel_keys(pts, size=VOXEL):
     q = np.floor(pts / size).astype(np.int64) + (1 << 20)        # +-40 km at 4 cm
     return (q[:, 0] << 42) | (q[:, 1] << 21) | q[:, 2]
@@ -95,6 +115,7 @@ class GpuLink:
         self.inflight: dict[str, dict[int, tuple]] = {}  # rid -> {f: (t_enqueued, t_sent)}
         self.last_answer: dict[str, float] = {}          # rid -> time of the last result from the worker
         self.last_nodepth_log: dict[str, float] = {}
+        self.last_seg_frame: dict[str, int] = {}
         self.wake = asyncio.Event()
         self.queue_cap = queue_cap
         self.stats: dict[str, dict[str, int]] = {}      # rid -> counters, printed every 5 s
@@ -105,15 +126,15 @@ class GpuLink:
         self.aligners: dict[str, Aligner] = {}
         self.segments: dict[str, int] = {}
 
-    def remember_pose(self, rid, f, T, K=None):
+    def remember_pose(self, rid, f, T, K=None, fp=None, wh=(518, 392)):
         p = self.poses.setdefault(rid, {})
-        p[f] = (T, K)
+        p[f] = (T, K, fp, wh)          # wh: size of the map image K is scaled to
         if len(p) > 300:
             p.pop(next(iter(p)))
 
     def count(self, rid, key, n=1):
         st = self.stats.setdefault(rid, {"in": 0, "sent": 0, "back": 0, "pts": 0, "skip_nopose": 0, "skip_scale": 0, "new_segment": 0,
-                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0, "dark": 0})
+                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0, "dark": 0, "fp_scale": 0, "lidar": 0})
         st[key] += n
 
     def print_stats(self):
@@ -127,7 +148,7 @@ class GpuLink:
             print(f"map {rid}: {st['in']} in, {st['sent']} sent, {st['back']} back, {st['pts']} new pts "
                   f"(no pose {st['skip_nopose']}, learning scale {st['skip_scale']}: short travel {st['short_travel']}, "
                   f"no depth {st['no_depth']}, new segments {st['new_segment']}; already mapped {st['all_seen']}; "
-                  f"dropped by worker {st['dropped_by_worker']}; dark frames skipped {st['dark']}); "
+                  f"dropped by worker {st['dropped_by_worker']}; dark frames skipped {st['dark']}; scale from features {st['fp_scale']}; lidar {st['lidar']}); "
                   f"queued {len(self.queue.get(rid, ()))}, in flight {len(self.inflight.get(rid, {}))}, "
                   f"link {'up' if self.ws else 'down'}", flush=True)
             for k in st:
@@ -211,7 +232,7 @@ class GpuLink:
         if entry is None:
             self.count(rid, "skip_nopose")
             return None
-        T, K = entry
+        T, K, fp, _ = entry
         if self.segments.get(rid) != h["segment"]:      # worker restarted lingbot: new depth scale,
             self.segments[rid] = h["segment"]           # so the old scale is wrong; re-learn it
             self.count(rid, "new_segment")
@@ -220,7 +241,13 @@ class GpuLink:
         al = self.aligners.setdefault(rid, Aligner())
         Rl, pl, cam, col = unproject(h, depth, conf, rgb, self.conf_min, K)
         Ra, pa = arkit_Rp(T)
+        # Scale: metric ARKit feature-point depth vs lingbot depth at the same pixels (per frame, no travel
+        # needed; lingbot's scale changes with every segment). Camera-travel alignment is the fallback.
+        s_fp = scale_from_features(h, depth, conf, fp, self.conf_min)
         sim = al.add(Rl, pl, Ra, pa)
+        if s_fp is not None:
+            sim = (s_fp, None, None)
+            self.count(rid, "fp_scale")
         if sim is None or not len(cam):
             self.count(rid, "skip_scale")
             self.count(rid, "no_depth" if not len(cam) else "short_travel")
@@ -231,9 +258,36 @@ class GpuLink:
                       f"nan {bool(np.isnan(conf).any() or np.isnan(depth).any())}, segment {h['segment']} frame {h['frame_index']}", flush=True)
             return None
         prev = self.scale.get(rid)
-        s = sim[0] if prev is None else (1 - SCALE_SMOOTH) * prev + SCALE_SMOOTH * sim[0]
+        w = 0.5 if s_fp is not None else SCALE_SMOOTH      # feature-point scale is a direct measurement
+        s = sim[0] if prev is None else (1 - w) * prev + w * sim[0]
         self.scale[rid] = s
-        cam = cam * s                                   # metres, OpenCV camera axes
+        return self.place(rid, h["seq"], cam * s, col, T)   # metres, OpenCV camera axes
+
+    def handle_lidar(self, rid, f, payload):
+        """LiDAR phone: ARKit scene depth is already metric, so no lingbot, no scale, no segments.
+        payload: w u16, h u16, depth f32[w*h], conf u8[w*h] (0 low, 1 medium, 2 high), map JPEG."""
+        self.count(rid, "in")
+        self.count(rid, "lidar")
+        entry = self.poses.get(rid, {}).get(f)
+        if entry is None:
+            self.count(rid, "skip_nopose")
+            return None
+        T, K, _, (w, h) = entry
+        dw, dh = struct.unpack_from("<HH", payload, 0)
+        n = dw * dh
+        depth = np.frombuffer(payload, "<f4", n, offset=4).reshape(dh, dw)
+        conf = np.frombuffer(payload, np.uint8, n, offset=4 + 4 * n).reshape(dh, dw)
+        rgb = np.asarray(Image.open(io.BytesIO(payload[4 + 5 * n:])).convert("RGB").resize((dw, dh)))
+        fx, fy, cx, cy = K[0] * dw / w, K[1] * dh / h, K[2] * dw / w, K[3] * dh / h   # lens for the depth grid
+        v, u = np.mgrid[0:dh, 0:dw]
+        keep = (conf >= LIDAR_CONF) & (depth > 0)
+        z = depth[keep]
+        cam = np.stack([(u[keep] - cx) / fx * z, (v[keep] - cy) / fy * z, z], 1)
+        return self.place(rid, f, cam, rgb[keep], T)
+
+    def place(self, rid, seq, cam, col, T):
+        """Camera-space metric points (OpenCV axes) -> world points with the ARKit pose, one per unseen voxel."""
+        Ra, pa = arkit_Rp(T)
         near = cam[:, 2] < MAX_DEPTH
         xyz = (cam[near] @ (Ra @ F).T + pa).astype(np.float32)   # placed with ARKit's own pose
         col = col[near]
@@ -246,10 +300,10 @@ class GpuLink:
         self.seen.update(keys[fresh].tolist())
         xyz, col = xyz[fresh], col[fresh]
         if len(xyz) > self.max_points:
-            idx = np.random.default_rng(h["seq"]).choice(len(xyz), self.max_points, replace=False)
+            idx = np.random.default_rng(seq).choice(len(xyz), self.max_points, replace=False)
             xyz, col = xyz[idx], col[idx]
         self.count(rid, "pts", len(xyz))
-        return rid, h["seq"], xyz, col
+        return rid, seq, xyz, col
 
     async def run(self):
         pump = asyncio.create_task(self.pump())
