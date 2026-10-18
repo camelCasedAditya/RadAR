@@ -58,9 +58,20 @@ function responder(id) {
   marker.add(body);
   const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(), 1.2, color, 0.3, 0.2);
   marker.add(arrow);
-  // AirPods head direction (protocol `head`): a cone from head height, independent of the chest camera
-  const coneGeo = new THREE.ConeGeometry(0.15, 0.5, 16).rotateX(-Math.PI / 2).translate(0, 0, -0.35);   // tip toward -Z
-  const head = new THREE.Mesh(coneGeo, new THREE.MeshBasicMaterial({ color: color.clone().lerp(new THREE.Color("#fff"), 0.5), transparent: true, opacity: 0.7 }));
+  // AirPods head direction (protocol `head`): the wearer's field of view, 100° wide x 110° tall, as the
+  // outline of a cone with its tip at the eyes opening along -Z, independent of the chest camera
+  const FOV_LEN = 1.2, rx = FOV_LEN * Math.tan(50 * Math.PI / 180), ry = FOV_LEN * Math.tan(55 * Math.PI / 180);
+  const fov = [];
+  for (let i = 0; i < 48; i++) {                       // rim ellipse
+    const a = i / 48 * 2 * Math.PI, b = (i + 1) / 48 * 2 * Math.PI;
+    fov.push(rx * Math.cos(a), ry * Math.sin(a), -FOV_LEN, rx * Math.cos(b), ry * Math.sin(b), -FOV_LEN);
+  }
+  for (let i = 0; i < 8; i++) {                        // edges from the eyes to the rim
+    const a = i / 8 * 2 * Math.PI;
+    fov.push(0, 0, 0, rx * Math.cos(a), ry * Math.sin(a), -FOV_LEN);
+  }
+  const fovGeo = new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(fov, 3));
+  const head = new THREE.LineSegments(fovGeo, new THREE.LineBasicMaterial({ color: color.clone().lerp(new THREE.Color("#fff"), 0.5), transparent: true, opacity: 0.8 }));
   head.position.y = 0.35; head.rotation.order = "YXZ"; head.visible = false;
   marker.add(head);
   marker.visible = false;
