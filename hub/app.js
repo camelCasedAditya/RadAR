@@ -6,7 +6,8 @@ import { onVideo, videoSupported } from "./video.js";
 const COLORS = ["#3fa7ff", "#ff9f1c", "#2ec4b6", "#e84855"];
 let tintOn = false;                 // see the Tint button below
 const MAX_POINTS = 6_000_000;   // per responder (90 MB); ring buffer wraps when full
-const TRAIL_SECONDS = 60;
+const PATH_STEP = 0.05;         // m; the movement path keeps one point per 5 cm walked, for the whole session
+const PATH_CAP = 200_000;       // points per responder (10 km of walking)
 
 // ---------- scene ----------
 const view = document.getElementById("view");
@@ -60,10 +61,11 @@ function responder(id) {
   marker.visible = false;
   scene.add(marker);
 
-  const trailGeo = new THREE.BufferGeometry();
-  trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(TRAIL_SECONDS * 12 * 3), 3));
+  const trailGeo = new THREE.BufferGeometry();       // movement path on the floor, whole session
+  trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(PATH_CAP * 3), 3));
   trailGeo.setDrawRange(0, 0);
   const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color }));
+  trail.frustumCulled = false;
   scene.add(trail);
 
   const patches = new THREE.Group();   // LiDAR photo patches (meshes) and their dot twins
@@ -87,7 +89,7 @@ function responder(id) {
     <canvas aria-label="Live video from responder ${id}"></canvas>`;
   side.appendChild(el);
 
-  r = { id, color, marker, arrow, trail, trailPts: [], cloud, ptsN: 0, ptsHead: 0,
+  r = { id, color, marker, arrow, trail, pathN: 0, pathLast: null, cloud, ptsN: 0, ptsHead: 0,
         img: el.querySelector("img"), meta: el.querySelector(".meta"), imgURL: null,
         canvas: el.querySelector("canvas"), feed: el, decoder: null, videoTimes: [], mapLag: null,
         pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0, patches, patchN: 0 };
@@ -112,14 +114,20 @@ function onPose(d) {
   r.poseTimes.push(now);
   while (r.poseTimes.length && now - r.poseTimes[0] > 2000) r.poseTimes.shift();
 
-  r.trailPts.push({ t: now, x: _p.x, y: 0.02, z: _p.z });
-  while (r.trailPts.length && now - r.trailPts[0].t > TRAIL_SECONDS * 1000) r.trailPts.shift();
+  addPathPoint(r, _p.x, _p.z);
+}
+
+function addPathPoint(r, x, z) {
+  const L = r.pathLast;
+  if (L && Math.hypot(x - L.x, z - L.z) < PATH_STEP) return;
+  if (r.pathN >= PATH_CAP) return;
   const arr = r.trail.geometry.attributes.position;
-  const n = Math.min(r.trailPts.length, arr.count);
-  const off = r.trailPts.length - n;
-  for (let i = 0; i < n; i++) { const q = r.trailPts[off + i]; arr.setXYZ(i, q.x, q.y, q.z); }
+  arr.setXYZ(r.pathN, x, 0.02, z);
+  arr.addUpdateRange(r.pathN * 3, 3);
   arr.needsUpdate = true;
-  r.trail.geometry.setDrawRange(0, n);
+  r.pathN++;
+  r.pathLast = { x, z };
+  r.trail.geometry.setDrawRange(0, r.pathN);
 }
 
 function onJpeg(id, payload) {
@@ -228,6 +236,7 @@ function clearMap() {                                  // relay started a new ma
     for (const o of r.patches.children) { o.geometry.dispose(); o.material.map?.dispose(); o.material.dispose(); }
     r.patches.clear(); r.patchN = 0;
     r.ptsN = r.ptsHead = 0; r.cloud.geometry.setDrawRange(0, 0);
+    r.pathN = 0; r.pathLast = null; r.trail.geometry.setDrawRange(0, 0);
   }
 }
 
@@ -336,7 +345,13 @@ async function playMap(name, mode, btn) {
   btn.disabled = false;
   if (new TextDecoder().decode(buf.subarray(0, 7)) !== "RADAR2\n") { alert("old file format"); return; }
   if (mode === "map") {
-    for (const r of records(buf)) if (!r.text && (r.body[0] === 2 || r.body[0] === 5)) await onBinary(r.body);
+    const td = new TextDecoder();
+    for (const r of responders.values()) { r.pathN = 0; r.pathLast = null; r.trail.geometry.setDrawRange(0, 0); }   // paths come from the file
+    for (const r of records(buf)) {
+      if (!r.text) { if (r.body[0] === 2 || r.body[0] === 5) await onBinary(r.body); continue; }
+      const d = JSON.parse(td.decode(r.body));
+      if (d.t === "pose") { _m.fromArray(d.T); addPathPoint(responder(d.id), _m.elements[12], _m.elements[14]); }   // walked path
+    }
     recEl.hidden = false; recEl.className = "saved"; recEl.textContent = `loaded "${name.replace(/\.radar$/, "")}"`;
     setTimeout(() => { if (!recording.name) recEl.hidden = true; }, 4000);
     return;
