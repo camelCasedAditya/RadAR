@@ -21,10 +21,10 @@ import websockets
 from align import F, Aligner, arkit_Rp
 
 STREAM_PREFIX = "radar-"     # keep our stream names apart from anyone else using the worker
-IN_FLIGHT = 2                # frames per stream at the worker once it is streaming (its own queue keeps 2)
+IN_FLIGHT = 2                # per stream: the worker keeps only 2 pending frames and drops the rest
 SCALE_FRAMES = 8             # worker answers nothing until it has this many after a (re)start
-SCALE_WAIT = 1.0             # s with no answer before we assume it is collecting scale frames
-LOST_AFTER = 10.0            # s before an unanswered frame is written off
+SCALE_WAIT = 1.0             # s with NO answers at all before we assume it is collecting scale frames
+LOST_AFTER = 5.0             # s before an unanswered frame is written off
 # ponytail: fixed quality knobs; tune on site (watch the hub for floaters vs holes).
 SCALE_SMOOTH = 0.05          # EMA weight of each new lingbot->metres scale estimate within a segment
 MAX_DEPTH = 5.0              # m; lingbot depth is least reliable far away
@@ -78,6 +78,7 @@ class GpuLink:
         # ponytail: fixed cap; at ~6 map fps per phone 60 frames is ~10 s of lag before oldest frames drop.
         self.queue: dict[str, deque] = {}               # rid -> (f, jpeg, t_enqueued), oldest first
         self.inflight: dict[str, dict[int, tuple]] = {}  # rid -> {f: (t_enqueued, t_sent)}
+        self.last_answer: dict[str, float] = {}          # rid -> time of the last result from the worker
         self.wake = asyncio.Event()
         self.queue_cap = queue_cap
         self.stats: dict[str, dict[str, int]] = {}      # rid -> counters, printed every 5 s
@@ -96,7 +97,7 @@ class GpuLink:
 
     def count(self, rid, key, n=1):
         st = self.stats.setdefault(rid, {"in": 0, "sent": 0, "back": 0, "pts": 0, "skip_nopose": 0, "skip_scale": 0, "new_segment": 0,
-                                                "no_depth": 0, "short_travel": 0, "all_seen": 0})
+                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0})
         st[key] += n
 
     def print_stats(self):
@@ -109,7 +110,8 @@ class GpuLink:
                 continue
             print(f"map {rid}: {st['in']} in, {st['sent']} sent, {st['back']} back, {st['pts']} new pts "
                   f"(no pose {st['skip_nopose']}, learning scale {st['skip_scale']}: short travel {st['short_travel']}, "
-                  f"no depth {st['no_depth']}, new segments {st['new_segment']}; already mapped {st['all_seen']}); "
+                  f"no depth {st['no_depth']}, new segments {st['new_segment']}; already mapped {st['all_seen']}; "
+                  f"dropped by worker {st['dropped_by_worker']}); "
                   f"queued {len(self.queue.get(rid, ()))}, in flight {len(self.inflight.get(rid, {}))}, "
                   f"link {'up' if self.ws else 'down'}", flush=True)
             for k in st:
@@ -122,11 +124,15 @@ class GpuLink:
         self.wake.set()
 
     def window(self, rid, now):
+        """How many frames may be at the worker. Normally IN_FLIGHT (it drops beyond that). While it
+        collects its 8 scale frames it answers nothing, so if frames are in flight and nothing has
+        come back for SCALE_WAIT, widen to 8. Ordinary lag keeps answers flowing, so it never widens then."""
         fl = self.inflight.setdefault(rid, {})
         for f in [f for f, (_, ts) in fl.items() if now - ts > LOST_AFTER]:
             del fl[f]
-        waiting = fl and now - min(ts for _, ts in fl.values()) > SCALE_WAIT
-        return SCALE_FRAMES if waiting else IN_FLIGHT
+        oldest_sent = min((ts for _, ts in fl.values()), default=now)
+        silent_since = max(self.last_answer.get(rid, 0.0), oldest_sent)
+        return SCALE_FRAMES if fl and now - silent_since > SCALE_WAIT else IN_FLIGHT
 
     async def pump(self):
         """Send queued frames whenever a stream has room in its window."""
@@ -152,8 +158,15 @@ class GpuLink:
                         break
 
     def answered(self, rid, seq):
-        """Free the window slot; returns seconds from capture to now (map lag)."""
-        t = self.inflight.get(rid, {}).pop(seq, None)
+        """Free the window slot; returns seconds from capture to now (map lag).
+        The worker answers in order and silently drops older frames when it is behind, so anything
+        older than an answered seq is gone too: free those slots now instead of waiting LOST_AFTER."""
+        fl = self.inflight.get(rid, {})
+        self.last_answer[rid] = time.time()
+        t = fl.pop(seq, None)
+        for old in [f for f in fl if f < seq]:
+            del fl[old]
+            self.count(rid, "dropped_by_worker")
         self.wake.set()
         return time.time() - t[0] if t else None
 
@@ -164,6 +177,7 @@ class GpuLink:
         self.scale.pop(rid, None)
         self.queue.pop(rid, None)
         self.inflight.pop(rid, None)
+        self.last_answer.pop(rid, None)
         if self.ws is not None:
             try:
                 await self.ws.send(json.dumps({"type": "reset", "stream": STREAM_PREFIX + rid}))
