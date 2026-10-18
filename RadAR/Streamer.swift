@@ -27,11 +27,14 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     private var lastError = ""
 
     static let width = 518  // lingbot-map native width; height is rounded to a multiple of 14
-    // ponytail: fixed map-frame gates; tune per venue (lower = denser map, more GPU lag).
-    static let mapMove: Float = 0.30         // metres moved since last map frame
-    static let mapTurn: Float = 15 * .pi / 180
-    static let mapFloor: TimeInterval = 1    // at least one map frame per second
-    static let mapMinGap: TimeInterval = 1.0 / 3   // at most 3 map frames per second per phone (A40: ~9/s total)
+    // lingbot-map is a streaming VIDEO model: each frame leans on the frames just before it, so it
+    // needs a steady, overlapping stream (its demos use 10 fps). Sparse "only when moved 30 cm" input
+    // collapsed its depth confidence. So: a fixed rate while moving, 1 fps when still.
+    // ponytail: 6 fps suits one phone on an A40 (~9 frames/s total through the tunnel); use 4 for two phones.
+    static let mapFps: Double = 6
+    static let mapMove: Float = 0.02         // "still" = under 2 cm and 1 degree since the last map frame
+    static let mapTurn: Float = 1 * .pi / 180
+    static let mapFloor: TimeInterval = 1    // at least one map frame per second even when still
 
     func start(url: URL, id: String) {
         queue.async { [self] in
@@ -136,10 +139,10 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
                   + (lastError.isEmpty ? "" : "\nlast drop: \(lastError)"))
     }
 
-    /// Moved or turned enough since the last map frame to add new geometry (or the 1 s floor passed).
+    /// Time for the next map frame: at mapFps while the phone is moving at all, 1 fps when still.
     private func isMapFrame(_ T: simd_float4x4, at t: TimeInterval) -> Bool {
         guard let last = lastMap else { return true }
-        if t - last.time < Self.mapMinGap { return false }
+        if t - last.time < 1 / Self.mapFps - 0.004 { return false }
         if t - last.time >= Self.mapFloor { return true }
         let moved = simd_distance(simd_make_float3(T.columns.3), simd_make_float3(last.T.columns.3))
         let r = simd_mul(simd_transpose(simd_float3x3(simd_make_float3(last.T.columns.0), simd_make_float3(last.T.columns.1),
