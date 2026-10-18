@@ -11,4 +11,4 @@ pip install -q flashinfer-python huggingface_hub fastapi "uvicorn[standard]" "ma
 mkdir -p weights
 [ -f weights/lingbot-map.pt ] || hf download robbyant/lingbot-map lingbot-map.pt --local-dir weights
 python -c "import torch, lingbot_map, flashinfer; print('setup ok', torch.__version__, torch.cuda.get_device_name(0))"
-exec bash "$(dirname "$0")/start_worker_runpod.sh"
+[ "${1:-}" = --no-start ] || exec bash "$(dirname "$0")/start_worker_runpod.sh"

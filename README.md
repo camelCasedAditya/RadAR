@@ -36,6 +36,12 @@ python server/relay/relay.py --gpu ws://localhost:8010/stream
 ```
 Open http://localhost:8000. The status strip says "GPU … fps" once the worker is connected. Phones and Mac must be on the same network (a phone hotspot works).
 
+**Pause and resume the pod (one command).** Stopping the pod in RunPod keeps `/workspace` (lingbot-map, weights, our code, saved maps) and the proxy URL, but wipes the pip installs and all running processes. After Start, read the new SSH ip:port from RunPod → Connect and run:
+```bash
+POD_IP=<ip> POD_PORT=<port> server/ec2/pod.sh up
+```
+That copies the current relay, hub and worker scripts, reinstalls lingbot only if its imports fail (~3 min on a fresh container), starts the worker with its 3-model warm-up if it is not already healthy, restarts the relay on 8888, and prints the hub and phone URLs. Run it again any time to deploy code changes (seconds). `pod.sh status` and `pod.sh logs` show health; `pod.sh up --restart-worker` forces a worker restart. Use Stop, never Terminate: Terminate deletes `/workspace`. A stopped pod can fail to find a free L40S on Start; the pod id and URL stay the same once it does.
+
 **Alternative: everything on the pod, no hotspot.** The relay and hub can run on the pod itself next to the worker, reachable through RunPod's HTTP proxy from any network (phones on cellular work). RunPod exposes only Jupyter's port 8888 on this pod, so Jupyter is stopped and the relay takes its port:
 ```bash
 ssh -p <port> root@<ip> 'mkdir -p /workspace/radar/server/relay /workspace/radar/hub'
