@@ -4,3 +4,4 @@ uvicorn[standard]
 websockets
 numpy
 pillow
+boto3   # only needed when RADAR_S3_BUCKET is set

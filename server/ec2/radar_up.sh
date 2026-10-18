@@ -27,6 +27,8 @@ pkill -f "[j]upyter-lab" 2>/dev/null || true
 pkill -f "[r]elay.py --port 8888" 2>/dev/null || true
 sleep 1
 cd $WS/radar
+# S3 copy of sessions: /workspace/radar-s3.env holds AWS_ACCESS_KEY_ID/SECRET, AWS_DEFAULT_REGION, RADAR_S3_BUCKET
+if [ -f $WS/radar-s3.env ]; then set -a; . $WS/radar-s3.env; set +a; fi
 nohup python server/relay/relay.py --port 8888 --gpu ws://127.0.0.1:8010/stream > $WS/relay.log 2>&1 < /dev/null &
 for _ in $(seq 20); do curl -sf --max-time 2 localhost:8888/maps >/dev/null && break; sleep 1; done
 echo "== relay: $(curl -s --max-time 2 localhost:8888/maps | head -c 120)"

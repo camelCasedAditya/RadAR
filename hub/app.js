@@ -279,12 +279,13 @@ const mapsBox = document.getElementById("mapsbox"), mapsBtn = document.getElemen
 let replaying = null;                   // name of the file being replayed, or null
 async function loadMaps() {
   const d = await (await fetch("/maps")).json();
-  document.getElementById("maps-current").textContent = `recording: ${d.current}`;
+  document.getElementById("maps-current").textContent = `recording: ${d.current}${d.bucket ? ` → s3://${d.bucket}` : ""}`;
   document.getElementById("maps-list").innerHTML = d.maps.map(m =>
-    `<li><span>${m.name}<br><span class="meta">${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, "0")} · ${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB</span></span>
+    `<li><span>${m.name}<br><span class="meta">${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, "0")} · ${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB · ${m.where === "s3" ? "☁ S3" : m.where === "both" ? "☁ + local" : "local"}</span></span>
      <span><button data-name="${m.name}" data-mode="map">Load</button>
      <button data-name="${m.name}" data-mode="replay">${replaying === m.name ? "Stop" : "Replay"}</button>
-     <a href="/maps/${m.name}" download title="download file">↓</a></span></li>`).join("");
+     <a href="/maps/${m.name}" download title="download file">↓</a>
+     <button data-name="${m.name}" data-mode="delete" title="delete everywhere">✕</button></span></li>`).join("");
   for (const b of document.querySelectorAll("#maps-list button")) b.onclick = () => playMap(b.dataset.name, b.dataset.mode, b);
 }
 function* records(buf) {                // RADAR2: u32 len | u32 t_ms | u8 type | body
@@ -296,6 +297,11 @@ function* records(buf) {                // RADAR2: u32 len | u32 t_ms | u8 type 
   }
 }
 async function playMap(name, mode, btn) {
+  if (mode === "delete") {
+    if (!confirm(`Delete ${name} from the relay and S3?`)) return;
+    await fetch(`/maps/${name}`, { method: "DELETE" });
+    return loadMaps();
+  }
   if (mode === "replay" && replaying === name) { replaying = null; return; }      // Stop
   btn.textContent = "loading…"; btn.disabled = true;
   const buf = new Uint8Array(await (await fetch(`/maps/${name}`)).arrayBuffer());

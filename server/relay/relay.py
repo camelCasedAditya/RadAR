@@ -6,6 +6,7 @@
 import argparse
 import asyncio
 import json
+import os
 import pathlib
 import struct
 import time
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from gpu_link import GpuLink
@@ -41,45 +42,88 @@ class MapFile:
     def __init__(self):
         MAPS_DIR.mkdir(exist_ok=True)
         self.f = None
+        self.store = None                                # S3 copy, see store.py
+        up = {}
+        if os.environ.get("RADAR_S3_BUCKET"):
+            try:
+                from store import S3Store
+                self.store = S3Store(os.environ["RADAR_S3_BUCKET"])
+                up = self.store.listing()                # also proves the credentials work
+                print(f"s3: sessions go to s3://{self.store.bucket}/sessions/", flush=True)
+            except Exception as e:                       # no creds / no boto3: local files only
+                print(f"s3: disabled ({e!r})", flush=True)
+                self.store = None
         self.new()
+        if self.store:                                   # crashed sessions: upload whole files now
+            for m in self.local():
+                if m["name"] != self.name and m["name"] not in up:
+                    self.store.sync_file(MAPS_DIR / m["name"], {k: m[k] for k in ("patches", "mapped", "seconds", "bytes")})
 
     def new(self):
-        if self.f:
-            self.f.close()
+        self.close()
         self.name = time.strftime("%Y%m%d-%H%M%S") + ".radar"
         self.f = open(MAPS_DIR / self.name, "ab")
-        self.f.write(self.MAGIC)
-        self.t0 = time.time()
+        self.t0, self.patches, self.mapped, self.t_ms, self.bytes = time.time(), 0, 0, 0, 0
+        if self.store:
+            self.store.begin(self.name)
+        self.write(self.MAGIC)
         self.append(json.dumps({"t": "state", "responders": state}))
         for frames in gop.values():
             for b in frames:
                 self.append(b)
 
+    def close(self):
+        if not self.f:
+            return
+        self.f.close()
+        if self.store:
+            self.store.finish({"patches": self.patches, "mapped": self.mapped, "seconds": self.t_ms // 1000, "bytes": self.bytes})
+
+    def write(self, b):
+        self.f.write(b)
+        self.f.flush()
+        self.bytes += len(b)
+        if self.store:
+            self.store.write(b)
+
     def append(self, msg):
         body = msg.encode() if isinstance(msg, str) else msg
-        t_ms = int((time.time() - self.t0) * 1000)
-        self.f.write(struct.pack("<IIB", len(body) + 5, t_ms, 0 if isinstance(msg, str) else 1) + body)
-        self.f.flush()
+        self.t_ms = int((time.time() - self.t0) * 1000)
+        if not isinstance(msg, str):
+            self.patches += body[0] == KIND_PATCH
+            self.mapped += body[0] in (KIND_POINTS, KIND_PATCH)   # a session that mapped nothing is not kept
+        self.write(struct.pack("<IIB", len(body) + 5, self.t_ms, 0 if isinstance(msg, str) else 1) + body)
 
-    @staticmethod
-    def listing():
+    def local(self):
         out = []
         for p in sorted(MAPS_DIR.glob("*.radar"), reverse=True):
             size = p.stat().st_size
-            patches, t_ms, pos = 0, 0, 0
+            patches, mapped, t_ms, pos = 0, 0, 0, 0
             with open(p, "rb") as f:
-                if f.read(len(MapFile.MAGIC)) != MapFile.MAGIC:
+                if f.read(len(self.MAGIC)) != self.MAGIC:
                     continue                             # pre-RADAR2 patch-only file; not listed
-                pos = len(MapFile.MAGIC)
+                pos = len(self.MAGIC)
                 while pos + 4 <= size:
                     ln, t_ms, typ = struct.unpack("<IIB", f.read(9))
                     first = f.read(1)
                     f.seek(ln - 6, 1)
                     pos += 4 + ln
                     patches += typ == 1 and first == bytes([KIND_PATCH])
-            if patches or p.name == maps.name:          # skip empty leftovers from earlier runs
-                out.append({"name": p.name, "bytes": size, "patches": patches, "seconds": t_ms // 1000})
+                    mapped += typ == 1 and first in (bytes([KIND_POINTS]), bytes([KIND_PATCH]))
+            if mapped or p.name == self.name:           # skip sessions that mapped nothing
+                out.append({"name": p.name, "bytes": size, "patches": patches, "mapped": mapped, "seconds": t_ms // 1000, "where": "local"})
         return out
+
+    def listing(self):
+        """Local files plus finished sessions in S3; a session in both places is listed once."""
+        out = {m["name"]: m for m in self.local()}
+        if self.store:
+            for name, meta in self.store.listing().items():
+                if name in out:
+                    out[name]["where"] = "both"
+                else:
+                    out[name] = {"name": name, **meta, "where": "s3"}
+        return sorted(out.values(), key=lambda m: m["name"], reverse=True)
 
 
 maps = MapFile()
@@ -112,6 +156,9 @@ def make_app(gpu_url=None, conf_min=2.0):
         yield
         if task:
             task.cancel()
+        maps.close()                                    # finish the S3 upload of the current session
+        if maps.store:
+            maps.store.close()
 
     app = FastAPI(lifespan=lifespan)
 
@@ -172,7 +219,7 @@ def make_app(gpu_url=None, conf_min=2.0):
 
     @app.get("/maps")
     def list_maps():
-        return {"current": maps.name, "maps": MapFile.listing()}
+        return {"current": maps.name, "bucket": maps.store.bucket if maps.store else None, "maps": maps.listing()}
 
     @app.post("/maps/new")
     async def new_map():
@@ -186,8 +233,25 @@ def make_app(gpu_url=None, conf_min=2.0):
 
     @app.get("/maps/{name}")
     def get_map(name: str):
-        p = MAPS_DIR / pathlib.Path(name).name          # no path tricks
-        return FileResponse(p, media_type="application/octet-stream") if p.suffix == ".radar" and p.exists() else {"error": "no such map"}
+        name = pathlib.Path(name).name                  # no path tricks
+        p = MAPS_DIR / name
+        if p.suffix != ".radar":
+            return {"error": "no such map"}
+        if p.exists():
+            return FileResponse(p, media_type="application/octet-stream")
+        if maps.store:
+            return RedirectResponse(maps.store.url(name))   # straight from S3, signed for an hour
+        return {"error": "no such map"}
+
+    @app.delete("/maps/{name}")
+    def delete_map(name: str):
+        name = pathlib.Path(name).name
+        if name == maps.name:
+            return {"error": "that session is still recording"}
+        (MAPS_DIR / name).unlink(missing_ok=True)
+        if maps.store:
+            maps.store.delete(name)
+        return {"deleted": name}
 
     @app.middleware("http")
     async def no_cache(request, call_next):
