@@ -4,7 +4,6 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { onVideo, videoSupported } from "./video.js";
 
 const COLORS = ["#3fa7ff", "#ff9f1c", "#2ec4b6", "#e84855"];
-let tintOn = false;                 // see the Tint button below
 const MAX_POINTS = 6_000_000;   // per responder (90 MB); ring buffer wraps when full
 const PATH_STEP = 0.05;         // m; the movement path keeps one point per 5 cm walked, for the whole session
 const PATH_CAP = 200_000;       // points per responder (10 km of walking)
@@ -92,7 +91,7 @@ function responder(id) {
   ptsGeo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(MAX_POINTS * 3), 3, true));
   ptsGeo.setDrawRange(0, 0);
   const cloud = new THREE.Points(ptsGeo, new THREE.PointsMaterial({
-    size: 0.011, vertexColors: !tintOn, color: tintOn ? color : 0xffffff,   // = relay voxel size, so surfaces close up
+    size: 0.011, vertexColors: true,   // = relay voxel size, so surfaces close up
     map: dotTexture, alphaTest: 0.5, transparent: false,   // round dots instead of squares
   }));
   cloud.frustumCulled = false;
@@ -615,21 +614,7 @@ mapsBtn.onclick = () => {
   if (!mapsBox.hidden) loadMaps();
 };
 
-// ---------- tint + follow + status ----------
-// Tint: colour each responder's points with their marker colour instead of camera colour,
-// so you can see which phone mapped what and how the two clouds stitch together.
-const tintBtn = document.getElementById("tint");
-tintBtn.onclick = () => {
-  tintOn = !tintOn;
-  tintBtn.textContent = `Tint: ${tintOn ? "by responder" : "off"}`;
-  tintBtn.setAttribute("aria-pressed", tintOn);
-  for (const r of responders.values()) {
-    r.cloud.material.vertexColors = !tintOn;
-    r.cloud.material.color.set(tintOn ? r.color : 0xffffff);
-    r.cloud.material.needsUpdate = true;
-  }
-};
-
+// ---------- connect + status ----------
 // Connect: QR code of this relay's phone URL (+ "#ID"), scanned by the app's Scan button.
 const qrBox = document.getElementById("qr"), connectBtn = document.getElementById("connect");
 let qrId = "A";
@@ -648,16 +633,6 @@ for (const b of document.querySelectorAll("#qr-ids button")) b.onclick = () => {
   qrId = b.dataset.id;
   for (const o of document.querySelectorAll("#qr-ids button")) o.setAttribute("aria-pressed", o === b);
   drawQR();
-};
-
-const followBtn = document.getElementById("follow");
-let followIdx = -1;
-followBtn.onclick = () => {
-  const ids = [...responders.keys()];
-  followIdx = followIdx + 1 >= ids.length ? -1 : followIdx + 1;
-  const on = followIdx >= 0;
-  followBtn.textContent = on ? `Follow: ${ids[followIdx]}` : "Follow: off";
-  followBtn.setAttribute("aria-pressed", on);
 };
 
 const status = document.getElementById("status");
@@ -701,11 +676,6 @@ setInterval(() => {
 }, 100);
 
 renderer.setAnimationLoop(() => {
-  const ids = [...responders.keys()];
-  if (followIdx >= 0 && ids[followIdx]) {
-    const p = responders.get(ids[followIdx]).marker.position;
-    controls.target.lerp(new THREE.Vector3(p.x, 0, p.z), 0.1);
-  }
   controls.update();
   renderer.render(scene, camera);
 });
