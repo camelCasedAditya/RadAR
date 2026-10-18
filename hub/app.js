@@ -357,17 +357,33 @@ async function playMap(name, mode, btn) {
     return;
   }
   replaying = name; btn.textContent = "■";
-  const t0 = performance.now();
+  clearMap();
+  // Play on the recorded timeline, but never sit through dead air: only phone traffic (poses and
+  // binary frames) advances the clock, and a gap of more than MAX_GAP between them (phones not yet
+  // connected, nobody moving) is cut to MAX_GAP. Relay status records just ride along.
+  const MAX_GAP = 2000, label2 = name.replace(/\.radar$/, "");
+  let total = 0; for (const r of records(buf)) total = r.t;
+  let clock = 0, prevT = 0, wall = performance.now();
+  const td = new TextDecoder();
   for (const r of records(buf)) {
     if (replaying !== name) break;
-    const wait = r.t - (performance.now() - t0);
-    if (wait > 0) await new Promise(res => setTimeout(res, wait));
-    if (r.text) { const d = JSON.parse(new TextDecoder().decode(r.body)); handlers[d.t]?.(d); }
+    const d = r.text ? JSON.parse(td.decode(r.body)) : null;
+    if (!d || d.t === "pose") {
+      clock += Math.min(r.t - prevT, MAX_GAP); prevT = r.t;
+      const wait = clock - (performance.now() - wall);
+      if (wait > 0) await new Promise(res => setTimeout(res, wait));
+      recEl.hidden = false; recEl.className = "saved";
+      recEl.textContent = `▶ replaying "${label2}" ${mmss(r.t / 1000)} / ${mmss(total / 1000)}`;
+    }
+    if (d) handlers[d.t]?.(d);
     else await onBinary(r.body);
   }
   if (replaying === name) replaying = null;
   btn.textContent = "▶";
+  recEl.textContent = `▶ finished "${label2}"`;
+  setTimeout(() => { if (!recording.name) recEl.hidden = true; }, 4000);
 }
+const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 mapsBtn.onclick = () => {
   mapsBox.hidden = !mapsBox.hidden;
   mapsBtn.setAttribute("aria-pressed", !mapsBox.hidden);
@@ -432,7 +448,7 @@ setInterval(() => {
     r.meta.textContent = `video ${vfps.toFixed(0)} fps · ${lag}`;
     return `<span class="${stale ? "warn" : ""}">${r.id}: ${stale ? `lost ${age.toFixed(0)}s` : `pose ${fps.toFixed(0)} fps`}, video ${vfps.toFixed(0)} fps, ${lag}, ${r.patchN ? `${r.patchN} patches` : `${(r.ptsN / 1000).toFixed(0)}k pts`}</span>`;
   }).join("") || "<span>waiting for responders…</span>";
-  if (recording.name && !recEl.classList.contains("saved")) {
+  if (recording.name && !recEl.classList.contains("saved") && !replaying) {
     const el = Math.max(0, Math.floor(Date.now() / 1000 - recording.since));
     recEl.innerHTML = `<b>●</b> recording "${recording.name}" ${Math.floor(el / 60)}:${String(el % 60).padStart(2, "0")}`;
   }
