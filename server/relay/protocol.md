@@ -4,7 +4,7 @@ One relay, two kinds of client, plus an outbound link to the GPU worker. All ove
 
 | Client | Endpoint | Sends | Receives |
 |---|---|---|---|
-| Phone | `/phone/{id}` | text + binary | call audio (kind 7) from the other phones and hubs, `phones`, `nitoken` |
+| Phone | `/phone/{id}` | text + binary | call audio (kind 7) from the other phones and hubs, `phones`, `peer`, `nitoken` |
 | GPU worker | — | relay connects out to it (`--gpu`), see `gpu_link.py` | |
 | Hub | `/hub` | call audio (kind 7, id `hub`) and `talk` | everything, plus `state` on connect |
 
@@ -23,7 +23,8 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 | `phones` | `ids` (every connected phone) | relay → phones | on every phone connect / disconnect; each phone pairs over UWB with the others |
 | `nitoken` | phone → relay: `to`, `token` (base64 NIDiscoveryToken of the session meant for `to`); relay → that phone: `from`, `token` | phone ↔ phone via relay | Nearby Interaction pairing, never sent to hubs |
 | `talk` | `on` (bool) | phone or hub (relay stamps id `hub`) | push-to-talk pressed / released |
-| `uwb` | `peer`, `distance` (m), `angle` (radians toward the peer, 0 = where this camera faces, + = right; null when UWB has no direction yet) | phone | Nearby Interaction (UWB), ~5 Hz per peer. The app and the hub draw an arrow + distance from it |
+| `uwb` | `peer`, `distance` (m) | phone | Nearby Interaction (UWB) distance to another phone, ~5 Hz. Arrow directions come from the poses; UWB gives the distance |
+| `peer` | `p` ([x, y, z] metres, ARKit world, from the pose's T) | relay → phones | another responder's position, 5 Hz each: the app's arrow directions |
 | `gps` | `lat`, `lon`, `heading` | phone | Module D |
 | `peer_pose` | `peer`, `T` | phone | Module E |
 | `uwb_check` | `peer`, `uwb`, `arkit`, `mismatch` (bool) | relay | Module C |

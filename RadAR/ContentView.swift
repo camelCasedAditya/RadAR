@@ -52,18 +52,16 @@ struct ContentView: View {
             .padding()
             // other responders: arrow toward each + distance; up = where this camera faces (same as the hub)
             GeometryReader { g in
-                ForEach(Array(peers.enumerated()), id: \.element.id) { i, p in
+                ForEach(peers) { p in
                     HStack(spacing: 4) {
-                        Image(systemName: p.angle == nil ? "dot.radiowaves.left.and.right" : "location.north.fill")
-                            .rotationEffect(.radians(p.angle ?? 0))
-                        Text("\(p.id) \(p.distance, specifier: "%.1f") m")
+                        Image(systemName: "location.north.fill").rotationEffect(.radians(p.angle))
+                        Text("\(p.id) \(p.uwb ? "" : "≈")\(p.distance, specifier: "%.1f") m")
                     }
                     .font(.headline)
                     .foregroundStyle(.yellow)
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(.black.opacity(0.6), in: Capsule())
-                    .position(p.angle.map { CGPoint(x: g.size.width * (0.5 + 0.4 * sin($0)), y: g.size.height * (0.5 - 0.4 * cos($0))) }
-                              ?? CGPoint(x: g.size.width / 2, y: g.size.height * 0.08 + CGFloat(i) * 34))   // no direction yet: listed at the top
+                    .position(x: g.size.width * (0.5 + 0.4 * sin(p.angle)), y: g.size.height * (0.5 - 0.4 * cos(p.angle)))
                 }
             }
             .allowsHitTesting(false)

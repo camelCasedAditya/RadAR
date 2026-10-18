@@ -1,53 +1,39 @@
-import ARKit
 import Foundation
 @preconcurrency import NearbyInteraction
 
-/// Distance and direction to the other responders over UWB (Nearby Interaction), phone to phone, with
-/// no shared start mark needed. One NISession per other phone; the sessions' discovery tokens travel
-/// through the relay (`phones`, `nitoken` in server/relay/protocol.md). With camera assistance (iPhone 14
-/// and later need it for direction) the peer also gets a position in this phone's ARKit world.
+/// Distance to the other responders over UWB (Nearby Interaction), phone to phone. Direction comes
+/// from the ARKit poses instead (Streamer.peerArrows, hub peerArrow). One NISession per other phone;
+/// the sessions' discovery tokens travel through the relay (`phones`, `nitoken` in protocol.md).
 /// All calls and delegate callbacks run on Streamer's queue.
 nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Sendable {
     var me = ""
     var sendToken: ((_ to: String, _ token: String) -> Void)?
-    var onReport: ((_ peer: String, _ distance: Double, _ angle: Double?) -> Void)?
-    var cameraT: () -> simd_float4x4? = { nil }
-    private(set) var latest: [String: (distance: Double, angle: Double?, at: TimeInterval)] = [:]
+    var onReport: ((_ peer: String, _ distance: Double) -> Void)?
+    private(set) var latest: [String: (distance: Double, at: TimeInterval)] = [:]
     private let queue: DispatchQueue
-    private let ar: ARSession
     private var phones: Set<String> = []
     private var sessions: [String: NISession] = [:]
     private var configs: [String: NINearbyPeerConfiguration] = [:]
     private var lastToken: [String: String] = [:]       // last token received from each peer
     private var lastReport: [String: TimeInterval] = [:]
     private var state: [String: String] = [:]           // per peer, for the phone's status line
-    private var noAssist = false                        // camera assistance failed once: measure without it
     private var lastReopen: [String: TimeInterval] = [:]
     private var tokenTries: [String: Int] = [:]
-    private var converge: [String: String] = [:]        // why camera-assisted direction is not ready yet
 
-    /// e.g. "uwb B 3.2 m ↗ · C waiting for token" (shown on the phone so a stalled pairing is visible)
+    /// e.g. "uwb B 3.2 m · C waiting for their token" (shown on the phone so a stalled pairing is visible)
     var status: String {
         guard Self.supported else { return "uwb: not supported on this phone" }
         guard !phones.isEmpty else { return "uwb: no other phones" }
         let now = ProcessInfo.processInfo.systemUptime
         return "uwb " + phones.sorted().map { id in
-            if let l = latest[id], now - l.at < 3 {
-                let why = !Self.cameraAssist ? "no direction: peer outside the UWB view"
-                    : noAssist ? "no direction: camera assist off" : "no direction: \(converge[id] ?? "converging")"
-                return "\(id) \(String(format: "%.1f", l.distance)) m\(l.angle == nil ? " (\(why))" : "")"
-            }
+            if let l = latest[id], now - l.at < 3 { return "\(id) \(String(format: "%.1f", l.distance)) m" }
             return "\(id) \(state[id] ?? "starting")"
         }.joined(separator: " · ")
     }
 
     static var supported: Bool { NISession.deviceCapabilities.supportsPreciseDistanceMeasurement }
-    private static var cameraAssist: Bool { NISession.deviceCapabilities.supportsCameraAssistance }
 
-    init(queue: DispatchQueue, ar: ARSession) {
-        self.queue = queue
-        self.ar = ar
-    }
+    init(queue: DispatchQueue) { self.queue = queue }
 
     /// The relay's phone list: pair with every other phone, drop the ones that left.
     func setPhones(_ ids: [String]) {
@@ -67,7 +53,6 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         let s = sessions[id] ?? open(id, announce: false)
         sendMyToken(s, to: id)
         let cfg = NINearbyPeerConfiguration(peerToken: token)
-        if Self.cameraAssist && !noAssist { cfg.isCameraAssistanceEnabled = true }
         state[id] = "searching"
         configs[id] = cfg
         s.run(cfg)
@@ -83,7 +68,6 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         let s = Self.makeSession()
         s.delegate = self
         s.delegateQueue = queue
-        if Self.cameraAssist && !noAssist { s.setARSession(ar) }   // shares the streaming ARSession
         sessions[id] = s
         state[id] = "waiting for their token"
         if announce { sendMyToken(s, to: id) }
@@ -106,21 +90,14 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         return s!
     }
 
-    /// The token can still be nil right after the session is made: retry every 0.5 s. After 2 s with
-    /// camera assistance on, start over without it (sharing the ARSession is the likely blocker).
+    /// The token can still be nil right after the session is made: retry every 0.5 s for 10 s.
     private func sendMyToken(_ s: NISession, to id: String) {
         guard let t = s.discoveryToken,
               let data = try? NSKeyedArchiver.archivedData(withRootObject: t, requiringSecureCoding: true) else {
             let n = (tokenTries[id] ?? 0) + 1
             tokenTries[id] = n
-            state[id] = "no token yet (try \(n)\(noAssist || !Self.cameraAssist ? ", no camera" : ""))"
-            if n == 4, Self.cameraAssist, !noAssist {
-                noAssist = true
-                let cfg = configs[id]
-                close(id)
-                let fresh = open(id)                    // announces itself (sendMyToken) again
-                if let cfg { cfg.isCameraAssistanceEnabled = false; configs[id] = cfg; fresh.run(cfg) }
-            } else if n < 20 {
+            state[id] = "no token yet (try \(n))"
+            if n < 20 {
                 queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     if let self, self.sessions[id] === s { self.sendMyToken(s, to: id) }
                 }
@@ -136,23 +113,12 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
     // MARK: NISessionDelegate (on `queue`)
 
     func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
-        guard let id = peer(of: session), let o = nearbyObjects.first, let d = o.distance else { return }
-        var angle: Double?
-        if let wt = session.worldTransform(for: o), let T = cameraT() {
-            // camera-assisted: the peer's ARKit position, measured against this camera's heading
-            let rel = simd_make_float3(wt.columns.3) - simd_make_float3(T.columns.3)
-            let f = simd_normalize(simd_float3(-T.columns.2.x, 0, -T.columns.2.z)), right = simd_float3(-f.z, 0, f.x)
-            angle = Double(atan2(simd_dot(rel, right), simd_dot(rel, f)))
-        } else if let dir = o.direction {
-            angle = Double(atan2(dir.x, -dir.z))       // device axes: x right, -z out of the back camera
-        } else if let h = o.horizontalAngle {
-            angle = Double(h)                          // camera assist, before a full position: azimuth, + = right
-        }
+        guard let id = peer(of: session), let d = nearbyObjects.first?.distance else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        latest[id] = (Double(d), angle, now)
+        latest[id] = (Double(d), now)
         if now - (lastReport[id] ?? 0) >= 0.2 {         // 5 Hz to the hub
             lastReport[id] = now
-            onReport?(id, Double(d), angle)
+            onReport?(id, Double(d))
         }
     }
 
@@ -163,25 +129,6 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         if reason == .timeout, let cfg = configs[id] { session.run(cfg) }   // out of range for a while: keep trying
     }
 
-    func session(_ session: NISession, didUpdateAlgorithmConvergence convergence: NIAlgorithmConvergence, for object: NINearbyObject?) {
-        guard let id = peer(of: session) else { return }
-        switch convergence.status {
-        case .converged: converge[id] = nil
-        case .notConverged(let reasons):
-            converge[id] = reasons.map { r -> String in
-                switch r {
-                case .insufficientMovement: return "walk around a little"
-                case .insufficientHorizontalSweep: return "sweep the phone side to side"
-                case .insufficientVerticalSweep: return "tilt the phone up and down"
-                case .insufficientLighting: return "too dark for the camera"
-                default: return r.localizedDescription ?? "converging"
-                }
-            }.joined(separator: ", ")
-        case .unknown: converge[id] = "converging"
-        @unknown default: converge[id] = "converging"
-        }
-    }
-
     func sessionSuspensionEnded(_ session: NISession) {
         if let id = peer(of: session), let cfg = configs[id] { session.run(cfg) }
     }
@@ -190,7 +137,6 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         guard let id = peer(of: session) else { return }
         print("[radar] uwb \(id): \(error)")
         let code = (error as? NIError)?.code
-        if Self.cameraAssist && !noAssist && code != .userDidNotAllow { noAssist = true }   // retry without the camera
         close(id)
         state[id] = "error: \(error.localizedDescription)"
         let now = ProcessInfo.processInfo.systemUptime
