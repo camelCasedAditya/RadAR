@@ -94,6 +94,7 @@ class GpuLink:
         self.queue: dict[str, deque] = {}               # rid -> (f, jpeg, t_enqueued), oldest first
         self.inflight: dict[str, dict[int, tuple]] = {}  # rid -> {f: (t_enqueued, t_sent)}
         self.last_answer: dict[str, float] = {}          # rid -> time of the last result from the worker
+        self.last_nodepth_log: dict[str, float] = {}
         self.wake = asyncio.Event()
         self.queue_cap = queue_cap
         self.stats: dict[str, dict[str, int]] = {}      # rid -> counters, printed every 5 s
@@ -223,6 +224,11 @@ class GpuLink:
         if sim is None or not len(cam):
             self.count(rid, "skip_scale")
             self.count(rid, "no_depth" if not len(cam) else "short_travel")
+            if not len(cam) and time.time() - self.last_nodepth_log.get(rid, 0) > 5:
+                self.last_nodepth_log[rid] = time.time()
+                print(f"map {rid}: seq {h['seq']} had no usable depth: conf median {float(np.nanmedian(conf)):.2f} "
+                      f"max {float(np.nanmax(conf)):.2f}, depth median {float(np.nanmedian(depth)):.2f}, "
+                      f"nan {bool(np.isnan(conf).any() or np.isnan(depth).any())}, segment {h['segment']} frame {h['frame_index']}", flush=True)
             return None
         prev = self.scale.get(rid)
         s = sim[0] if prev is None else (1 - SCALE_SMOOTH) * prev + SCALE_SMOOTH * sim[0]
