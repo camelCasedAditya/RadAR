@@ -25,7 +25,8 @@ HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
 MAPS_DIR = pathlib.Path(__file__).resolve().parents[1] / "maps"
 
 hubs: set[WebSocket] = set()
-phones: dict[str, WebSocket] = {}  # id -> socket; phones receive only call audio
+phones: dict[str, WebSocket] = {}  # id -> socket; phones receive only call audio and `peer` positions
+peer_sent: dict[str, float] = {}     # id -> monotonic time its position last went to the other phones
 state: dict[str, dict] = {}          # id -> {msg type -> latest msg}
 last_jpeg: dict[str, bytes] = {}     # id -> latest jpeg binary message
 gop: dict[str, list[bytes]] = {}     # id -> latest h264 keyframe + frames since, for late hubs
@@ -235,11 +236,11 @@ async def send_hubs(msg, skip=None):
 
 
 async def send_phones(msg, skip=None):
-    """Call audio to every phone but the talker, in parallel: a phone on a stalled network loses this
-    chunk instead of holding up the call for everyone."""
+    """Call audio / peer positions to every phone but the sender, in parallel: a phone on a stalled
+    network loses this message instead of holding up everyone else."""
     async def one(rid, ws):
         try:
-            await asyncio.wait_for(ws.send_bytes(msg), 1)
+            await asyncio.wait_for(ws.send_text(msg) if isinstance(msg, str) else ws.send_bytes(msg), 1)
         except asyncio.TimeoutError:
             pass
         except Exception:
@@ -288,6 +289,9 @@ def make_app(gpu_url=None, conf_min=2.0):
                     d["id"] = rid
                     state.setdefault(rid, {})[d["t"]] = d
                     await send_hubs(json.dumps(d))
+                    if d["t"] == "pose" and time.monotonic() - peer_sent.get(rid, 0) >= 0.2:   # 5 Hz is plenty for arrows
+                        peer_sent[rid] = time.monotonic()
+                        await send_phones(json.dumps({"t": "peer", "id": rid, "p": d["T"][12:15]}), skip=rid)
                     if link and d["t"] == "hello":
                         await link.reset(rid)
                     elif link and d["t"] == "pose":

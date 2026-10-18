@@ -103,10 +103,10 @@ function responder(id) {
   el.innerHTML = `<header><span class="dot" style="background:${COLORS[responders.size % COLORS.length]}"></span>
     <b>Responder ${id}</b><span class="mic" hidden title="talking">🎙</span><span class="meta"></span></header>
     <div class="vid"><img alt="Live camera from responder ${id}"><canvas aria-label="Live video from responder ${id}"></canvas>
-    <span class="hr" hidden aria-live="off"></span></div>`;
+    <span class="hr" hidden aria-live="off"></span><div class="peers"></div></div>`;
   side.appendChild(el);
 
-  r = { id, color, marker, arrow, head, hrEl: el.querySelector(".hr"), hrAt: 0, mic: el.querySelector(".mic"), trail, pathN: 0, pathLast: null, cloud, ptsN: 0, ptsHead: 0,
+  r = { id, color, marker, arrow, head, hrEl: el.querySelector(".hr"), peersEl: el.querySelector(".peers"), hrAt: 0, mic: el.querySelector(".mic"), trail, pathN: 0, pathLast: null, cloud, ptsN: 0, ptsHead: 0,
         img: el.querySelector("img"), meta: el.querySelector(".meta"), imgURL: null,
         canvas: el.querySelector("canvas"), feed: el, decoder: null, videoTimes: [], mapLag: null,
         pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0, patches, patchN: 0, patchByF: new Map() };
@@ -660,6 +660,20 @@ setInterval(() => {
   const g = gpu && now - gpu.at < 6000;
   status.innerHTML += g ? `<span>GPU ${gpu.fps} fps · ${gpu.mem_gb} GB</span>` : `<span class="warn">GPU offline</span>`;
 }, 500);
+
+// Other responders on each feed: an arrow toward each one and its distance. Up = where this responder's
+// camera faces, right = their right (top-down, from the yaw-only markers); same layout as the app.
+function peerArrow(r, o) {
+  const d = o.marker.position.clone().sub(r.marker.position), y = r.marker.rotation.y;
+  const ahead = -d.x * Math.sin(y) - d.z * Math.cos(y), right = d.x * Math.cos(y) - d.z * Math.sin(y);
+  const a = Math.atan2(right, ahead);
+  return `<span class="peer" style="left:${50 + 40 * Math.sin(a)}%;top:${50 - 38 * Math.cos(a)}%;color:#${o.color.getHexString()}">`
+    + `<i style="transform:rotate(${a}rad)">▲</i>${o.id} ${d.length().toFixed(1)} m</span>`;
+}
+setInterval(() => {
+  const now = performance.now(), live = [...responders.values()].filter(r => r.marker.visible && now - r.lastSeen < 5000);
+  for (const r of responders.values()) r.peersEl.innerHTML = live.includes(r) ? live.filter(o => o !== r).map(o => peerArrow(r, o)).join("") : "";
+}, 100);
 
 renderer.setAnimationLoop(() => {
   const ids = [...responders.keys()];

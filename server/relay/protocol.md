@@ -4,7 +4,7 @@ One relay, two kinds of client, plus an outbound link to the GPU worker. All ove
 
 | Client | Endpoint | Sends | Receives |
 |---|---|---|---|
-| Phone | `/phone/{id}` | text + binary | call audio (kind 7) from the other phones and hubs |
+| Phone | `/phone/{id}` | text + binary | call audio (kind 7) from the other phones and hubs, `peer` positions |
 | GPU worker | — | relay connects out to it (`--gpu`), see `gpu_link.py` | |
 | Hub | `/hub` | call audio (kind 7, id `hub`) and `talk` | everything, plus `state` on connect |
 
@@ -20,6 +20,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 | `pose` | `f` (frame id, int), `ts` (s, float), `T` (16 floats, column-major 4×4 camera-to-world, metres, ARKit axes: +Y up), `K` ([fx, fy, cx, cy] for the 518-wide map image), `w`, `h`, `fp` (map frames only: ARKit feature points as [u, v, z] pixels in the map image + metric depth, ≤300; the relay reads lingbot depth at these pixels for a per-frame metric scale) | phone | every camera frame (30 Hz). Map JPEGs and video frames reuse the same `f` |
 | `head` | `yaw` (radians, ARKit world frame like the pose: the phone zeroes the AirPods at the first sample, assuming the wearer looks where the chest camera looks), `pitch` (radians, + = looking up) | phone | AirPods head tracking, ~10 Hz. The hub draws a cone on the marker |
 | `hr` | `bpm` | phone | AirPods Pro 3 heart rate (HealthKit workout while streaming), each sample. Hub badge on the video corner |
+| `peer` | `p` ([x, y, z] metres, ARKit world, from the pose's T) | relay → phones | another responder's position, 5 Hz each. The app draws an arrow + distance toward each one; the hub does the same on each feed from the poses it already has |
 | `talk` | `on` (bool) | phone or hub (relay stamps id `hub`) | push-to-talk pressed / released |
 | `uwb` | `peer`, `distance` (m), `direction` ([x,y,z] or null) | phone | Module C |
 | `gps` | `lat`, `lon`, `heading` | phone | Module D |

@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var streamer = Streamer()
     @State private var scanning = false
     @State private var talking = false
+    @State private var peers: [PeerArrow] = []
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -49,6 +50,21 @@ struct ContentView: View {
             .padding()
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             .padding()
+            // other responders: arrow toward each + distance; up = where this camera faces (same as the hub)
+            GeometryReader { g in
+                ForEach(peers) { p in
+                    HStack(spacing: 4) {
+                        Image(systemName: "location.north.fill").rotationEffect(.radians(p.angle))
+                        Text("\(p.id) \(p.distance, specifier: "%.1f") m")
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.yellow)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .position(x: g.size.width * (0.5 + 0.4 * sin(p.angle)), y: g.size.height * (0.5 - 0.4 * cos(p.angle)))
+                }
+            }
+            .allowsHitTesting(false)
         }
         .sheet(isPresented: $scanning) {
             QRScanner { text in
@@ -66,6 +82,7 @@ struct ContentView: View {
         if running {
             if talking { talking = false; streamer.setTalking(false) }
             streamer.stop()
+            peers = []
             running = false
             status = "idle"
             return
@@ -75,6 +92,7 @@ struct ContentView: View {
             return
         }
         streamer.onStatus = { s in DispatchQueue.main.async { status = s } }
+        streamer.onPeers = { p in DispatchQueue.main.async { if running { peers = p } } }
         streamer.start(url: url, id: responderID.trimmingCharacters(in: .whitespaces))
         running = true
     }

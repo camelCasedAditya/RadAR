@@ -67,6 +67,11 @@ async def main():
         assert False, ("phone A got", m[:8])
     except asyncio.TimeoutError:
         pass
+    # peer positions: a pose from A reaches B as {"t": "peer", "id": "A", "p": [x, y, z]} (the relay sends 5 Hz)
+    await asyncio.sleep(0.25)
+    await ph.send(json.dumps({"t": "pose", "f": 99, "ts": 9.9, "T": pose_T(1.0, 2.0, 0)}))
+    peer = json.loads(await recv_until(pb, lambda m: isinstance(m, str) and json.loads(m)["t"] == "peer"))
+    assert peer["id"] == "A" and peer["p"] == [1.0, 1.4, 2.0], peer
     await pb.close()
 
     # Enhance (local mode, no S3): unknown map -> 409; a recorded map is queued, the background job
