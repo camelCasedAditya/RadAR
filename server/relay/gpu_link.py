@@ -71,7 +71,7 @@ def voxel_keys(pts, size=VOXEL):
 
 
 class GpuLink:
-    def __init__(self, url, on_points, on_status, conf_min=3.0, max_points=20_000, queue_cap=15):
+    def __init__(self, url, on_points, on_status, conf_min=1.5, max_points=20_000, queue_cap=15):
         self.url, self.on_points, self.on_status = url, on_points, on_status
         self.conf_min, self.max_points = conf_min, max_points
         self.ws = None
@@ -80,6 +80,8 @@ class GpuLink:
         self.inflight: dict[str, dict[int, tuple]] = {}  # rid -> {f: (t_enqueued, t_sent)}
         self.wake = asyncio.Event()
         self.queue_cap = queue_cap
+        self.stats: dict[str, dict[str, int]] = {}      # rid -> counters, printed every 5 s
+        self.last_print = 0.0
         self.poses: dict[str, dict[int, tuple]] = {}     # rid -> {frame id: (ARKit T, K or None)}
         self.scale: dict[str, float] = {}                # rid -> smoothed lingbot->metres scale
         self.seen: set[int] = set()                      # occupied voxels, all phones
@@ -92,7 +94,29 @@ class GpuLink:
         if len(p) > 300:
             p.pop(next(iter(p)))
 
+    def count(self, rid, key, n=1):
+        st = self.stats.setdefault(rid, {"in": 0, "sent": 0, "back": 0, "pts": 0, "skip_nopose": 0, "skip_scale": 0, "new_segment": 0,
+                                                "no_depth": 0, "short_travel": 0})
+        st[key] += n
+
+    def print_stats(self):
+        now = time.time()
+        if now - self.last_print < 5 or not self.stats:
+            return
+        self.last_print = now
+        for rid, st in self.stats.items():
+            if not any(st.values()):
+                continue
+            print(f"map {rid}: {st['in']} in, {st['sent']} sent, {st['back']} back, {st['pts']} new pts "
+                  f"(no pose {st['skip_nopose']}, learning scale {st['skip_scale']}: short travel {st['short_travel']}, "
+                  f"no depth {st['no_depth']}, new segments {st['new_segment']}); "
+                  f"queued {len(self.queue.get(rid, ()))}, in flight {len(self.inflight.get(rid, {}))}, "
+                  f"link {'up' if self.ws else 'down'}", flush=True)
+            for k in st:
+                st[k] = 0
+
     def enqueue(self, rid, f, jpeg):
+        self.count(rid, "in")
         q = self.queue.setdefault(rid, deque(maxlen=self.queue_cap))
         q.append((f, jpeg, time.time()))
         self.wake.set()
@@ -112,6 +136,7 @@ class GpuLink:
             except asyncio.TimeoutError:
                 pass
             self.wake.clear()
+            self.print_stats()
             if self.ws is None:
                 continue
             now = time.time()
@@ -120,6 +145,7 @@ class GpuLink:
                 while q and len(fl) < self.window(rid, now):
                     f, jpeg, t_enq = q.popleft()
                     fl[f] = (t_enq, now)
+                    self.count(rid, "sent")
                     try:
                         await self.ws.send(pack({"type": "frame", "stream": STREAM_PREFIX + rid, "seq": f}, jpeg))
                     except websockets.ConnectionClosed:
@@ -147,12 +173,15 @@ class GpuLink:
     def handle_result(self, msg):
         h, depth, conf, rgb = decode_result(msg)
         rid = h["stream"].removeprefix(STREAM_PREFIX)
+        self.count(rid, "back")
         entry = self.poses.get(rid, {}).get(h["seq"])
         if entry is None:
+            self.count(rid, "skip_nopose")
             return None
         T, K = entry
         if self.segments.get(rid) != h["segment"]:      # worker restarted lingbot: new depth scale,
             self.segments[rid] = h["segment"]           # so the old scale is wrong; re-learn it
+            self.count(rid, "new_segment")
             self.aligners[rid] = Aligner()
             self.scale.pop(rid, None)
         al = self.aligners.setdefault(rid, Aligner())
@@ -160,6 +189,8 @@ class GpuLink:
         Ra, pa = arkit_Rp(T)
         sim = al.add(Rl, pl, Ra, pa)
         if sim is None or not len(cam):
+            self.count(rid, "skip_scale")
+            self.count(rid, "no_depth" if not len(cam) else "short_travel")
             return None
         prev = self.scale.get(rid)
         s = sim[0] if prev is None else (1 - SCALE_SMOOTH) * prev + SCALE_SMOOTH * sim[0]
@@ -178,6 +209,7 @@ class GpuLink:
         if len(xyz) > self.max_points:
             idx = np.random.default_rng(h["seq"]).choice(len(xyz), self.max_points, replace=False)
             xyz, col = xyz[idx], col[idx]
+        self.count(rid, "pts", len(xyz))
         return rid, h["seq"], xyz, col
 
     async def run(self):
@@ -208,7 +240,11 @@ class GpuLink:
                         h = json.loads(m[4:4 + hlen])
                         rid = h["stream"].removeprefix(STREAM_PREFIX)
                         lag = self.answered(rid, h["seq"])
-                        out = await asyncio.to_thread(self.handle_result, m)
+                        try:
+                            out = await asyncio.to_thread(self.handle_result, m)
+                        except Exception as e:      # one bad frame must not stop mapping
+                            print(f"map {rid}: frame {h['seq']} failed: {e!r}", flush=True)
+                            continue
                         if out and lag is not None:
                             await self.on_points(*out, lag, len(self.queue.get(rid, ())))
             except (OSError, websockets.ConnectionClosed, websockets.InvalidHandshake) as e:
