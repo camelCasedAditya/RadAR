@@ -8,7 +8,7 @@ Design: `docs/superpowers/specs/2026-10-17-radar-design.md`. Wire format: `serve
 
 **1. GPU worker.** Either option runs the same lingbot worker on `127.0.0.1:8010` on the GPU box; the relay reaches it through an SSH tunnel.
 
-*RunPod (current).* On a PyTorch 2.8 / CUDA 12.8 pod with SSH over exposed TCP, from the repo root:
+*RunPod (current).* Measured streaming inference: L40S ~52 ms/frame (two phones at 6 map fps), A40 ~112 ms/frame (one phone). On a PyTorch 2.8 / CUDA 12.8 pod with SSH over exposed TCP (add your Mac's key under RunPod Settings → SSH Public Keys first), from the repo root:
 ```bash
 scp -P <port> server/ec2/worker.py server/ec2/setup_runpod.sh server/ec2/start_worker_runpod.sh root@<ip>:/workspace/
 ssh -p <port> root@<ip> 'mkdir -p /workspace/rad-ar && mv /workspace/worker.py /workspace/rad-ar/ && bash /workspace/setup_runpod.sh'
