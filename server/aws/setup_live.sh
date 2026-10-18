@@ -23,7 +23,7 @@ fi
 $VENV/bin/pip install -q --upgrade pip
 $VENV/bin/pip install -q torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
 $VENV/bin/pip install -q -e "lingbot-map[vis]"
-$VENV/bin/pip install -q flashinfer-python huggingface_hub fastapi "uvicorn[standard]" "matplotlib<3.9" websockets pillow boto3 numpy
+$VENV/bin/pip install -q flashinfer-python huggingface_hub fastapi "uvicorn[standard]" "matplotlib<3.9" websockets pillow boto3 numpy amazon-transcribe
 [ -f /opt/weights/lingbot-map.pt ] || $VENV/bin/hf download robbyant/lingbot-map lingbot-map.pt --local-dir /opt/weights
 $VENV/bin/python -c "import torch, lingbot_map, flashinfer; print('setup ok', torch.__version__, torch.cuda.get_device_name(0))"
 
@@ -32,6 +32,7 @@ RADAR_S3_BUCKET=$RADAR_S3_BUCKET
 RADAR_HOST=$RADAR_HOST
 RADAR_ENHANCE_INSTANCE=${RADAR_ENHANCE_INSTANCE:-}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-2}
+RADAR_TRANSCRIBE=1
 HF_HOME=/opt/hf
 CUDA_HOME=/usr/local/cuda
 PATH=$VENV/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin

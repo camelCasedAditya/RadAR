@@ -255,6 +255,7 @@ surfaceBtn.onclick = () => {
 };
 
 function clearMap() {                                  // relay started a new map file
+  clearTranscript();
   clearEnhanced();
   for (const r of responders.values()) {
     for (const o of r.patches.children) { o.geometry.dispose(); o.material.map?.dispose(); o.material.dispose(); }
@@ -279,6 +280,7 @@ const handlers = {
     r.head.visible = true;
   },
   uwb: (d) => { responder(d.id).uwb[d.peer] = { distance: d.distance, at: performance.now() }; },
+  transcript: onTranscript,
   talk: (d) => { talking[d.id] = d.on; if (d.id !== "hub") responder(d.id).mic.hidden = !d.on; },
   state: (d) => { for (const [id, msgs] of Object.entries(d.responders)) for (const m of Object.values(msgs)) handlers[m.t]?.({ ...m, id }); },
 };   // add-on modules register more types here
@@ -299,6 +301,26 @@ function onBinary(b) {                 // one relay binary message (live socket 
   else if (kind === 7) onAudio(id, payload);
 }
 window.radar = { scene, responders, responder, handlers, onBinary, THREE, camera, controls };
+
+// ---------- live transcript (protocol `transcript`: AWS Transcribe on the call, finals also in the file) ----------
+const txBox = document.getElementById("transcript"), txLines = document.getElementById("tx-lines");
+function onTranscript(d) {                 // partials of one utterance share d.rid and update one line in place
+  let p = txLines.querySelector(`p[data-rid="${CSS.escape(d.rid)}"]`);
+  if (!p) {
+    p = document.createElement("p"); p.dataset.rid = d.rid;
+    const color = d.id === "hub" ? "#fff" : `#${responder(d.id).color.getHexString()}`;
+    p.innerHTML = `<time></time><b style="color:${color}"></b> <span></span>`;
+    p.querySelector("time").textContent = new Date(d.start * 1000).toLocaleTimeString();
+    p.querySelector("b").textContent = d.id === "hub" ? "Hub" : d.id;
+    txLines.append(p);
+    while (txLines.children.length > 60) txLines.firstElementChild.remove();
+  }
+  p.querySelector("span").textContent = d.text;
+  p.classList.toggle("partial", d.partial);
+  txBox.hidden = false;
+  txBox.scrollTop = txBox.scrollHeight;
+}
+function clearTranscript() { txLines.replaceChildren(); txBox.hidden = true; }
 
 // ---------- voice call (protocol kind 7: 16 kHz int16 PCM, push-to-talk party line) ----------
 let actx = null, sock = null, talk = null, seq = 0, worklet = null;

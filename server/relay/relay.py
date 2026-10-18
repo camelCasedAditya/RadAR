@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from gpu_link import GpuLink
+from transcribe import Transcriber
 from wire import KIND_AUDIO, KIND_DEPTH, KIND_H264, KIND_JPEG, KIND_PATCH, KIND_POINTS, pack_bin, pack_points, unpack_bin
 
 HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
@@ -249,6 +250,24 @@ async def send_phones(msg, skip=None):
     await asyncio.gather(*(one(rid, ws) for rid, ws in list(phones.items()) if rid != skip))
 
 
+async def on_transcript(who, rid, text, partial, start, end):
+    """Transcribe result for the call. Finals go through send_hubs, so they land in the session file
+    beside the audio (start/end are epoch seconds); partials only update the hubs' live line."""
+    msg = json.dumps({"t": "transcript", "id": who, "rid": rid, "text": text, "partial": partial,
+                      "start": round(start, 2), "end": round(end, 2)})
+    if not partial:
+        return await send_hubs(msg)
+    for ws in list(hubs):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            hubs.discard(ws)
+
+
+transcriber = Transcriber(on_transcript, os.environ.get("AWS_DEFAULT_REGION", "us-east-2")) \
+    if os.environ.get("RADAR_TRANSCRIBE") == "1" else None
+
+
 async def send_phones_to(ws, msg):
     try:
         await asyncio.wait_for(ws.send_text(msg), 1)
@@ -331,6 +350,8 @@ def make_app(gpu_url=None, conf_min=2.0):
                     elif kind == KIND_AUDIO:
                         await send_hubs(b)
                         await send_phones(b, skip=rid)
+                        if transcriber:
+                            transcriber.feed(rid, payload)
         except WebSocketDisconnect:
             pass
         finally:
@@ -357,6 +378,8 @@ def make_app(gpu_url=None, conf_min=2.0):
                 if m.get("bytes") is not None and m["bytes"][:1] == bytes([KIND_AUDIO]):
                     await send_hubs(m["bytes"], skip=ws)
                     await send_phones(m["bytes"])
+                    if transcriber:
+                        transcriber.feed("hub", unpack_bin(m["bytes"])[3])
                 elif m.get("text") is not None and json.loads(m["text"]).get("t") == "talk":
                     await send_hubs(json.dumps({"t": "talk", "id": "hub", "on": bool(json.loads(m["text"]).get("on"))}), skip=ws)
         except WebSocketDisconnect:

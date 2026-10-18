@@ -22,6 +22,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 | `hr` | `bpm` | phone | AirPods Pro 3 heart rate (HealthKit workout while streaming), each sample. Hub badge on the video corner |
 | `phones` | `ids` (every connected phone) | relay → phones | on every phone connect / disconnect; each phone pairs over UWB with the others |
 | `nitoken` | phone → relay: `to`, `token` (base64 NIDiscoveryToken of the session meant for `to`); relay → that phone: `from`, `token` | phone ↔ phone via relay | Nearby Interaction pairing, never sent to hubs |
+| `transcript` | `id` (talker: phone id or `hub`), `rid` (result id: partials of one utterance share it), `text`, `partial` (bool), `start`, `end` (epoch s of the speech) | relay → hubs | AWS Transcribe on the call audio (relay env `RADAR_TRANSCRIBE=1`). Finals are recorded in the session file; partials are live only |
 | `talk` | `on` (bool) | phone or hub (relay stamps id `hub`) | push-to-talk pressed / released |
 | `uwb` | `peer`, `distance` (m) | phone | Nearby Interaction (UWB) distance to another phone, ~5 Hz. Arrow directions come from the poses; UWB gives the distance |
 | `peer` | `p` ([x, y, z] metres, ARKit world, from the pose's T) | relay → phones | another responder's position, 5 Hz each: the app's arrow directions |
