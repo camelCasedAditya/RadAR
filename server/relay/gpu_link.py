@@ -15,8 +15,11 @@ import struct
 import time
 from collections import deque
 
+import io
+
 import numpy as np
 import websockets
+from PIL import Image
 
 from align import F, Aligner, arkit_Rp
 
@@ -29,6 +32,7 @@ LOST_AFTER = 5.0             # s before an unanswered frame is written off
 SCALE_SMOOTH = 0.05          # EMA weight of each new lingbot->metres scale estimate within a segment
 MAX_DEPTH = 5.0              # m; lingbot depth is least reliable far away
 VOXEL = 0.04                 # m; one point kept per cube, shared by all phones
+MIN_BRIGHTNESS = 12          # mean grey level below which a map frame is treated as a dead camera
 
 
 def pack(header: dict, payload: bytes = b"") -> bytes:
@@ -65,6 +69,17 @@ def unproject(h, depth, conf, rgb, conf_min, K=None):
     return c2w[:, :3], c2w[:, 3], cam, rgb[keep]
 
 
+def is_dark(jpeg: bytes) -> bool:
+    """A camera that has not started yet sends pure black frames. If lingbot's first 8 frames are
+    black its whole sequence is anchored on nothing and every later frame scores ~0 confidence."""
+    try:
+        im = Image.open(io.BytesIO(jpeg))
+        im.draft("L", (im.width // 8, im.height // 8))
+        return np.asarray(im.convert("L").resize((32, 24))).mean() < MIN_BRIGHTNESS
+    except Exception:
+        return False        # not decodable here; let the worker decide
+
+
 def voxel_keys(pts, size=VOXEL):
     q = np.floor(pts / size).astype(np.int64) + (1 << 20)        # +-40 km at 4 cm
     return (q[:, 0] << 42) | (q[:, 1] << 21) | q[:, 2]
@@ -97,7 +112,7 @@ class GpuLink:
 
     def count(self, rid, key, n=1):
         st = self.stats.setdefault(rid, {"in": 0, "sent": 0, "back": 0, "pts": 0, "skip_nopose": 0, "skip_scale": 0, "new_segment": 0,
-                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0})
+                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0, "dark": 0})
         st[key] += n
 
     def print_stats(self):
@@ -111,7 +126,7 @@ class GpuLink:
             print(f"map {rid}: {st['in']} in, {st['sent']} sent, {st['back']} back, {st['pts']} new pts "
                   f"(no pose {st['skip_nopose']}, learning scale {st['skip_scale']}: short travel {st['short_travel']}, "
                   f"no depth {st['no_depth']}, new segments {st['new_segment']}; already mapped {st['all_seen']}; "
-                  f"dropped by worker {st['dropped_by_worker']}); "
+                  f"dropped by worker {st['dropped_by_worker']}; dark frames skipped {st['dark']}); "
                   f"queued {len(self.queue.get(rid, ()))}, in flight {len(self.inflight.get(rid, {}))}, "
                   f"link {'up' if self.ws else 'down'}", flush=True)
             for k in st:
@@ -119,6 +134,9 @@ class GpuLink:
 
     def enqueue(self, rid, f, jpeg):
         self.count(rid, "in")
+        if is_dark(jpeg):
+            self.count(rid, "dark")
+            return
         q = self.queue.setdefault(rid, deque(maxlen=self.queue_cap))
         q.append((f, jpeg, time.time()))
         self.wake.set()

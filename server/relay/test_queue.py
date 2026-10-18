@@ -50,6 +50,15 @@ async def main():
         seqs = [f for f, _ in got[rid]]
         assert seqs == sorted(seqs) and len(seqs) > 0.8 * len(sent[rid]), (rid, seqs)  # first ~8 wait for alignment travel
     lags = [l for r in got.values() for _, l in r]
+    # black frames (camera not started yet) never reach the worker
+    import io
+    from PIL import Image
+    black, grey = io.BytesIO(), io.BytesIO()
+    Image.new("RGB", (518, 392), (0, 0, 0)).save(black, "JPEG")
+    Image.new("RGB", (518, 392), (90, 90, 90)).save(grey, "JPEG")
+    dark = GpuLink("unused", None, None)
+    dark.enqueue("C", 1, black.getvalue()); dark.enqueue("C", 2, grey.getvalue())
+    assert [f for f, _, _ in dark.queue["C"]] == [2] and dark.stats["C"]["dark"] == 1
     # default cap bounds lag: a 40-frame burst keeps only the newest 15 queued
     capped = GpuLink("unused", None, None)
     for f in range(40):
