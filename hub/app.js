@@ -442,12 +442,11 @@ async function loadMaps() {
   if (busy && !mapsBox.hidden) mapsPoll = setTimeout(loadMaps, 5000);     // watch the enhancer work
 }
 let mapsMeta = {}, mapsPoll = null;
-function enhanceControl(m) {              // ✦ Enhance | ✦ queued… | ✦ enhanced  (the EC2 enhancer, see enhance.py)
+function enhanceControl(m) {              // ✦ queued… | ✦ enhanced  (the EC2 enhancer, see enhance.py)
   const e = m.enhanced, s = e?.status;
   if (s === "done" && e.hd) return `<span class="meta" title="${e.phones?.length} phone(s), ${(e.bytes / 1e6).toFixed(0)} MB, ${e.seconds}s">✦ enhanced</span>`;
   if (s === "queued" || s === "running") return `<span class="meta">✦ ${s}…</span>`;
-  const why = s === "failed" ? `last attempt failed: ${e.error}` : "re-texture this map with sharp photos from its video (takes a few minutes)";
-  return `<button data-name="${m.name}" data-mode="enhance" title="${why.replace(/"/g, "'")}">✦ ${s === "failed" ? "Retry" : "Enhance"}</button>`;
+  return "";
 }
 
 // ---------- enhanced: the same patches, re-textured from the video (enhance.py -> <name>.hd) ----------
@@ -542,12 +541,6 @@ async function playMap(name, mode, btn) {
     return loadMaps();
   }
   if (mode === "replay" && replaying === name) { replaying = null; return; }      // Stop
-  if (mode === "enhance") {
-    btn.disabled = true;
-    const res = await fetch(`/maps/${name}/enhance`, { method: "POST" });
-    if (!res.ok) alert(`Enhance: ${(await res.json()).detail}`);
-    return loadMaps();
-  }
   const label2 = name.replace(/\.radar$/, "");
   let progress = "";                                   // "12 / 49 MB" while the file streams in
   const onProgress = (got, total) => { progress = total ? `${mb(got)} / ${mb(total)} MB` : `${mb(got)} MB`; };
