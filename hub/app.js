@@ -58,9 +58,9 @@ function responder(id) {
   marker.add(body);
   const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(), 1.2, color, 0.3, 0.2);
   marker.add(arrow);
-  // AirPods head direction (protocol `head`): the wearer's field of view, 100° wide x 110° tall, as the
+  // AirPods head direction (protocol `head`): the wearer's field of view, 60° wide x 70° tall, as the
   // outline of a cone with its tip at the eyes opening along -Z, independent of the chest camera
-  const FOV_LEN = 1.2, rx = FOV_LEN * Math.tan(50 * Math.PI / 180), ry = FOV_LEN * Math.tan(55 * Math.PI / 180);
+  const FOV_LEN = 1.2, rx = FOV_LEN * Math.tan(30 * Math.PI / 180), ry = FOV_LEN * Math.tan(35 * Math.PI / 180);
   const fov = [];
   for (let i = 0; i < 48; i++) {                       // rim ellipse
     const a = i / 48 * 2 * Math.PI, b = (i + 1) / 48 * 2 * Math.PI;
