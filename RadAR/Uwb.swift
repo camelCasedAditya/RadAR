@@ -1,6 +1,6 @@
 import ARKit
 import Foundation
-import NearbyInteraction
+@preconcurrency import NearbyInteraction
 
 /// Distance and direction to the other responders over UWB (Nearby Interaction), phone to phone, with
 /// no shared start mark needed. One NISession per other phone; the sessions' discovery tokens travel
@@ -23,6 +23,7 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
     private var state: [String: String] = [:]           // per peer, for the phone's status line
     private var noAssist = false                        // camera assistance failed once: measure without it
     private var lastReopen: [String: TimeInterval] = [:]
+    private var tokenTries: [String: Int] = [:]
 
     /// e.g. "uwb B 3.2 m ↗ · C waiting for token" (shown on the phone so a stalled pairing is visible)
     var status: String {
@@ -74,7 +75,7 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
 
     @discardableResult
     private func open(_ id: String, announce: Bool = true) -> NISession {
-        let s = NISession()
+        let s = Self.makeSession()
         s.delegate = self
         s.delegateQueue = queue
         if Self.cameraAssist && !noAssist { s.setARSession(ar) }   // shares the streaming ARSession
@@ -92,11 +93,36 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         state[id] = nil
     }
 
+    /// NISession on the main thread: its discovery token came back nil when made on our background queue.
+    private static func makeSession() -> NISession {
+        if Thread.isMainThread { return NISession() }
+        nonisolated(unsafe) var s: NISession?
+        DispatchQueue.main.sync { s = NISession() }
+        return s!
+    }
+
+    /// The token can still be nil right after the session is made: retry every 0.5 s. After 2 s with
+    /// camera assistance on, start over without it (sharing the ARSession is the likely blocker).
     private func sendMyToken(_ s: NISession, to id: String) {
         guard let t = s.discoveryToken,
               let data = try? NSKeyedArchiver.archivedData(withRootObject: t, requiringSecureCoding: true) else {
-            state[id] = "no token (session not ready)"; return
+            let n = (tokenTries[id] ?? 0) + 1
+            tokenTries[id] = n
+            state[id] = "no token yet (try \(n)\(noAssist || !Self.cameraAssist ? ", no camera" : ""))"
+            if n == 4, Self.cameraAssist, !noAssist {
+                noAssist = true
+                let cfg = configs[id]
+                close(id)
+                let fresh = open(id)                    // announces itself (sendMyToken) again
+                if let cfg { cfg.isCameraAssistanceEnabled = false; configs[id] = cfg; fresh.run(cfg) }
+            } else if n < 20 {
+                queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    if let self, self.sessions[id] === s { self.sendMyToken(s, to: id) }
+                }
+            }
+            return
         }
+        tokenTries[id] = nil
         sendToken?(id, data.base64EncodedString())
     }
 
