@@ -239,6 +239,7 @@ const handlers = {
   gpu: (d) => { gpu = { ...d, at: performance.now() }; },
   maplag: (d) => { responder(d.id).mapLag = d; },
   map_new: () => { clearMap(); loadMaps(); },
+  state: (d) => { for (const [id, msgs] of Object.entries(d.responders)) for (const m of Object.values(msgs)) handlers[m.t]?.({ ...m, id }); },
 };   // add-on modules register more types here
 
 function onBinary(b) {                 // one relay binary message (live socket or a saved map file)
@@ -263,10 +264,7 @@ function connect() {
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       const d = JSON.parse(ev.data);
-      if (d.t === "state") {
-        for (const [id, msgs] of Object.entries(d.responders))
-          for (const m of Object.values(msgs)) handlers[m.t]?.({ ...m, id });
-      } else handlers[d.t]?.(d);
+      handlers[d.t]?.(d);
       return;
     }
     onBinary(new Uint8Array(ev.data));
@@ -276,24 +274,49 @@ connect();
 
 // ---------- saved maps (relay: GET /maps, GET /maps/<name>, POST /maps/new) ----------
 const mapsBox = document.getElementById("mapsbox"), mapsBtn = document.getElementById("maps");
+// A session file holds everything the live hub saw. "Load" applies just the geometry (points,
+// patches) at once; "Replay" plays it all back on its original timeline: video, markers, map growth.
+let replaying = null;                   // name of the file being replayed, or null
 async function loadMaps() {
   const d = await (await fetch("/maps")).json();
   document.getElementById("maps-current").textContent = `recording: ${d.current}`;
   document.getElementById("maps-list").innerHTML = d.maps.map(m =>
-    `<li><span>${m.name}<br><span class="meta">${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB</span></span>
-     <button data-name="${m.name}">Load</button></li>`).join("");
-  for (const b of document.querySelectorAll("#maps-list button")) b.onclick = () => loadMap(b.dataset.name, b);
+    `<li><span>${m.name}<br><span class="meta">${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, "0")} · ${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB</span></span>
+     <span><button data-name="${m.name}" data-mode="map">Load</button>
+     <button data-name="${m.name}" data-mode="replay">${replaying === m.name ? "Stop" : "Replay"}</button>
+     <a href="/maps/${m.name}" download title="download file">↓</a></span></li>`).join("");
+  for (const b of document.querySelectorAll("#maps-list button")) b.onclick = () => playMap(b.dataset.name, b.dataset.mode, b);
 }
-async function loadMap(name, btn) {
-  btn.textContent = "loading…"; btn.disabled = true;
-  const buf = new Uint8Array(await (await fetch(`/maps/${name}`)).arrayBuffer());
-  const dv = new DataView(buf.buffer);
-  for (let pos = 0; pos + 4 <= buf.length;) {           // u32 len | binary message
+function* records(buf) {                // RADAR2: u32 len | u32 t_ms | u8 type | body
+  const dv = new DataView(buf.buffer, buf.byteOffset);
+  for (let pos = 7; pos + 4 <= buf.length;) {
     const len = dv.getUint32(pos, true);
-    await onBinary(buf.subarray(pos + 4, pos + 4 + len));
+    yield { t: dv.getUint32(pos + 4, true), text: buf[pos + 8] === 0, body: buf.subarray(pos + 9, pos + 4 + len) };
     pos += 4 + len;
   }
-  btn.textContent = "loaded"; btn.disabled = false;
+}
+async function playMap(name, mode, btn) {
+  if (mode === "replay" && replaying === name) { replaying = null; return; }      // Stop
+  btn.textContent = "loading…"; btn.disabled = true;
+  const buf = new Uint8Array(await (await fetch(`/maps/${name}`)).arrayBuffer());
+  btn.disabled = false;
+  if (new TextDecoder().decode(buf.subarray(0, 7)) !== "RADAR2\n") { btn.textContent = "old file"; return; }
+  if (mode === "map") {
+    for (const r of records(buf)) if (!r.text && (r.body[0] === 2 || r.body[0] === 5)) await onBinary(r.body);
+    btn.textContent = "loaded";
+    return;
+  }
+  replaying = name; btn.textContent = "Stop";
+  const t0 = performance.now();
+  for (const r of records(buf)) {
+    if (replaying !== name) break;
+    const wait = r.t - (performance.now() - t0);
+    if (wait > 0) await new Promise(res => setTimeout(res, wait));
+    if (r.text) { const d = JSON.parse(new TextDecoder().decode(r.body)); handlers[d.t]?.(d); }
+    else await onBinary(r.body);
+  }
+  if (replaying === name) replaying = null;
+  btn.textContent = "Replay";
 }
 mapsBtn.onclick = () => {
   mapsBox.hidden = !mapsBox.hidden;

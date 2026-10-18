@@ -54,7 +54,7 @@ Hub: `https://<pod-id>-8888.proxy.runpod.net`. Phones: `wss://<pod-id>-8888.prox
 
 **LiDAR phones** (iPhone Pro) skip the GPU: ARKit's metric depth goes to the relay, which upsamples it to the map image and sends the hub a textured *patch* (the photo draped over its depth) whenever the camera has moved 25 cm or turned 15°. The hub's "Surface" button switches between the photo patches and their vertices as dots. Phones without LiDAR still map through lingbot as points.
 
-**Saved maps.** Every patch is appended to `server/maps/<start time>.radar` while the relay runs. The hub's "Maps" button lists the files, loads one into the view (works with no phones connected), and "New map" starts a fresh file. Delete files from that folder to free space.
+**Saved sessions.** While the relay runs, everything the hub receives (poses, 30 fps video, map JPEGs, lingbot points, LiDAR photo patches) is appended to `server/maps/<start time>.radar`, roughly 25 MB per phone-minute of video plus the map. The hub's "Maps" button lists the files with duration and size; **Load** puts just the map (points and patches) into the view at once, **Replay** plays the whole session back on its timeline with video and markers, and ↓ downloads the file. "New map" starts a fresh file and clears the view. Delete files from that folder (on the pod: `/workspace/radar/server/maps`) to free space; `server/relay/protocol.md` has the format.
 
 The relay sends each phone's frames to the worker as stream `radar-<id>`, unprojects the returned depth, and aligns it to ARKit's metric frame (`server/relay/gpu_link.py`, `align.py`). `--conf` sets the depth-confidence cut (default 1.5).
 

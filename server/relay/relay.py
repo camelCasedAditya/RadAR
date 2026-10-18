@@ -30,36 +30,55 @@ link: GpuLink | None = None
 
 
 class MapFile:
-    """The map is the sequence of LiDAR patch messages. Each session appends them to
-    maps/<start time>.radar as  u32 len | kind-5 message  records; the hub replays a file to show
-    a saved map. ponytail: a flat file, not a DB; one file per session, nothing is ever rewritten."""
+    """Session file: everything the relay sends hubs (poses, video, map JPEGs, points, LiDAR patches),
+    so a file replays as the live hub saw it, or loads instantly as just the map.
+    maps/<start time>.radar = b"RADAR2\n" then records  u32 len | u32 t_ms | u8 type | body
+    (type 0 = text JSON, 1 = binary message; len covers t_ms + type + body). A file opens with the
+    responder state and each phone's latest video keyframe group, like a late-joining hub gets.
+    ponytail: a flat append-only file, not a DB; one file per session, nothing is ever rewritten."""
+    MAGIC = b"RADAR2\n"
+
     def __init__(self):
         MAPS_DIR.mkdir(exist_ok=True)
+        self.f = None
         self.new()
 
     def new(self):
+        if self.f:
+            self.f.close()
         self.name = time.strftime("%Y%m%d-%H%M%S") + ".radar"
         self.f = open(MAPS_DIR / self.name, "ab")
-        self.patches = 0
+        self.f.write(self.MAGIC)
+        self.t0 = time.time()
+        self.append(json.dumps({"t": "state", "responders": state}))
+        for frames in gop.values():
+            for b in frames:
+                self.append(b)
 
-    def append(self, msg: bytes):
-        self.f.write(struct.pack("<I", len(msg)) + msg)
+    def append(self, msg):
+        body = msg.encode() if isinstance(msg, str) else msg
+        t_ms = int((time.time() - self.t0) * 1000)
+        self.f.write(struct.pack("<IIB", len(body) + 5, t_ms, 0 if isinstance(msg, str) else 1) + body)
         self.f.flush()
-        self.patches += 1
 
     @staticmethod
     def listing():
         out = []
         for p in sorted(MAPS_DIR.glob("*.radar"), reverse=True):
-            n, pos, size = 0, 0, p.stat().st_size
+            size = p.stat().st_size
+            patches, t_ms, pos = 0, 0, 0
             with open(p, "rb") as f:
+                if f.read(len(MapFile.MAGIC)) != MapFile.MAGIC:
+                    continue                             # pre-RADAR2 patch-only file; not listed
+                pos = len(MapFile.MAGIC)
                 while pos + 4 <= size:
-                    (ln,) = struct.unpack("<I", f.read(4))
-                    f.seek(ln, 1)
+                    ln, t_ms, typ = struct.unpack("<IIB", f.read(9))
+                    first = f.read(1)
+                    f.seek(ln - 6, 1)
                     pos += 4 + ln
-                    n += 1
-            if n or p.name == maps.name:                # skip empty leftovers from earlier runs
-                out.append({"name": p.name, "bytes": size, "patches": n})
+                    patches += typ == 1 and first == bytes([KIND_PATCH])
+            if patches or p.name == maps.name:          # skip empty leftovers from earlier runs
+                out.append({"name": p.name, "bytes": size, "patches": patches, "seconds": t_ms // 1000})
         return out
 
 
@@ -67,6 +86,7 @@ maps = MapFile()
 
 
 async def send_hubs(msg):
+    maps.append(msg)                     # everything a hub sees is in the session file
     for ws in list(hubs):
         try:
             await (ws.send_text(msg) if isinstance(msg, str) else ws.send_bytes(msg))
@@ -123,9 +143,7 @@ def make_app(gpu_url=None, conf_min=2.0):
                     elif kind == KIND_DEPTH:            # LiDAR phone: metric depth -> textured patch, no GPU
                         patch = await asyncio.to_thread(link.handle_lidar, rid, f, payload)
                         if patch:
-                            msg = pack_bin(KIND_PATCH, rid, f, patch)
-                            maps.append(msg)
-                            await send_hubs(msg)
+                            await send_hubs(pack_bin(KIND_PATCH, rid, f, patch))
                             await send_hubs(json.dumps({"t": "maplag", "id": rid, "lag": 0, "queued": 0}))
                     elif kind == KIND_H264:
                         if payload[0] & 1:
@@ -162,7 +180,8 @@ def make_app(gpu_url=None, conf_min=2.0):
         if link:
             link.seen.clear()
             link.keyposes.clear()
-        await send_hubs(json.dumps({"t": "map_new", "id": "", "name": maps.name}))
+        for ws in list(hubs):
+            await ws.send_text(json.dumps({"t": "map_new", "id": "", "name": maps.name}))
         return {"current": maps.name}
 
     @app.get("/maps/{name}")
