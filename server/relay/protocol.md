@@ -30,7 +30,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 ## Binary messages
 
 ```
-byte 0      kind     1 = jpeg, 2 = points, 3 = h264, 4 = depth
+byte 0      kind     1 = jpeg, 2 = points, 3 = h264, 4 = depth, 5 = patch
 byte 1      idlen
 bytes 2..   id       (idlen bytes, utf-8)
 next 4      f        uint32 little-endian frame id
@@ -41,5 +41,10 @@ rest        payload
 - kind 2 payload: `n` uint32 LE, then `n*3` float32 LE xyz (metres, ARKit frame), then `n*3` uint8 rgb. Sent by the relay after aligning the worker's depth.
 - kind 3 payload (**live video**, 30 fps): `flags` u8 (bit 0 = keyframe), then one H.264 access unit in Annex-B form (start codes). Keyframes carry SPS and PPS first. Same sensor orientation as kind 1. Relay forwards it untouched and replays the latest keyframe group to hubs that connect late.
 - kind 4 payload (**LiDAR map frame**, iPhone Pro only, sent *instead of* kind 1): `w` u16 LE, `h` u16 LE (ARKit scene depth grid, 256×192), `w*h` float32 LE depth in metres, `w*h` uint8 ARKit confidence (0 low, 1 medium, 2 high), then the map JPEG as in kind 1. Relay keeps high-confidence pixels, colours them from the JPEG, and places them with the `pose` of the same `f`; no GPU involved.
+- kind 5 payload (**LiDAR patch**, relay → hub): `hlen` u32 LE, JSON header `{T, K, w, h, dw, dh, s}` (the frame's ARKit pose and lens for the w×h image; a dw×dh grid sampled every `s` pixels), `dw*dh` float16 LE depth in metres along the camera axis (0 = hole), then the map JPEG. The hub drapes the JPEG over a mesh built from the grid, dropping triangles across depth jumps. Sent only on keyframes (camera moved 25 cm or turned 15°). LiDAR phones get patches instead of kind 2 points.
+
+## Saved maps
+
+The relay appends every kind 5 message to `server/maps/<start time>.radar` as `u32 len | message` records. `GET /maps` lists files (`{name, bytes, patches}`) and the current one; `GET /maps/<name>` returns a file; `POST /maps/new` starts a new file, clears the relay's voxel/keyframe state and sends hubs `map_new`. The hub's Maps panel loads a file by replaying its records through the normal message handler.
 
 Helpers: `server/relay/wire.py` (`pack_bin`, `unpack_bin`, `pack_points`, `unpack_points`).

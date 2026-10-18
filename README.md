@@ -46,6 +46,10 @@ Hub: `https://<pod-id>-8888.proxy.runpod.net`. Phones: `wss://<pod-id>-8888.prox
 
 **4. Phones.** Build `RadAR.xcodeproj` to each phone (set your signing team). Enter `ws://<mac-ip>:8000` and a responder ID (`A`, `B`). Both responders stand on the same floor mark facing the same wall and tap Start. The hub shows 30 fps video right away; the 3D cloud appears after about half a metre of walking and trails you by a few seconds (shown as "map lag").
 
+**LiDAR phones** (iPhone Pro) skip the GPU: ARKit's metric depth goes to the relay, which upsamples it to the map image and sends the hub a textured *patch* (the photo draped over its depth) whenever the camera has moved 25 cm or turned 15°. The hub's "Surface" button switches between the photo patches and their vertices as dots. Phones without LiDAR still map through lingbot as points.
+
+**Saved maps.** Every patch is appended to `server/maps/<start time>.radar` while the relay runs. The hub's "Maps" button lists the files, loads one into the view (works with no phones connected), and "New map" starts a fresh file. Delete files from that folder to free space.
+
 The relay sends each phone's frames to the worker as stream `radar-<id>`, unprojects the returned depth, and aligns it to ARKit's metric frame (`server/relay/gpu_link.py`, `align.py`). `--conf` sets the depth-confidence cut (default 1.5).
 
 ## Develop without phones or a GPU

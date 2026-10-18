@@ -32,6 +32,12 @@
   #qr-img { background:#fff; padding:10px; border-radius:4px; line-height:0; }
   #qr-img svg { width:220px; height:220px; }
   #qr-url { word-break:break-all; color:var(--dim); }
+  #qr[hidden], #mapsbox[hidden] { display:none; }
+  #mapsbox { position:absolute; top:44px; right:10px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; min-width:320px; max-height:60vh; overflow-y:auto; }
+  #mapsbox .row { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
+  #mapsbox ul { list-style:none; margin:0; padding:0; }
+  #mapsbox li { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:4px 0; border-top:1px solid var(--line); }
+  #mapsbox .meta { color:var(--dim); }
   @media (max-width:760px) {
     #app { grid-template-columns:1fr; grid-template-rows:55vh auto auto; }
     #side { grid-row:3; grid-column:1; border-left:0; border-top:1px solid var(--line); }
@@ -48,7 +54,11 @@
 <div id="app">
   <div id="view">
     <div id="conn">connecting…</div>
-    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
+    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="maps" aria-pressed="false">Maps</button><button id="surface" aria-pressed="true">Surface: photos</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
+    <div id="mapsbox" hidden>
+      <div class="row"><b id="maps-current"></b><button id="maps-new">New map</button></div>
+      <ul id="maps-list"></ul>
+    </div>
     <div id="qr" hidden>
       <p>Scan in the RadAR app (Scan button). Pick the responder ID first:</p>
       <div id="qr-ids"><button data-id="A" aria-pressed="true">A</button><button data-id="B" aria-pressed="false">B</button><button data-id="C" aria-pressed="false">C</button><button data-id="" aria-pressed="false">no ID</button></div>

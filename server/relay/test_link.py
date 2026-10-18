@@ -86,17 +86,23 @@ DW, DH = 256, 192
 depth = np.full((DH, DW), 2.0, np.float32)                       # flat wall 2 m ahead
 conf = np.full((DH, DW), 2, np.uint8); conf[:, :DW // 2] = 1     # left half low confidence: dropped
 payload = struct.pack("<HH", DW, DH) + depth.tobytes() + conf.tobytes() + fake_jpeg("L", 0.5)
+from gpu_link import PATCH_STRIDE, decode_result
+import json
 ll = GpuLink("unused", None, None)
 T0 = pose_T(0, 0, 0)                                              # at the origin, 1.4 m up, looking -Z
 ll.remember_pose("P", 1, T0, K, None, (W, H))
-rid, seq, xyz, rgb = ll.handle_lidar("P", 1, payload)
-assert rid == "P" and seq == 1 and len(xyz) == len(rgb) > 1000
-assert abs(xyz[:, 2] + 2).max() < 1e-3, "wall must sit at z = -2 m"
-assert xyz[:, 0].min() > -0.05, "low-confidence left half (negative x) must be dropped"
-assert abs(xyz[:, 1].mean() - 1.4) < 0.2, "wall centred at camera height"
-assert ll.handle_lidar("P", 1, payload) is None, "same view again adds nothing"
-assert ll.handle_lidar("P", 2, payload) is None, "no pose for frame 2 -> skipped"
-assert ll.stats["P"]["lidar"] == 3 and ll.stats["P"]["skip_nopose"] == 1
+msg = ll.handle_lidar("P", 1, payload)                           # -> a textured patch (kind-5 payload)
+(hl,) = struct.unpack_from("<I", msg, 0); hdr = json.loads(msg[4:4 + hl]); body = msg[4 + hl:]
+assert hdr["s"] == PATCH_STRIDE and hdr["T"] == T0 and hdr["K"] == K and (hdr["w"], hdr["h"]) == (W, H)
+g = np.frombuffer(body[:hdr["dw"] * hdr["dh"] * 2], "<f2").reshape(hdr["dh"], hdr["dw"])
+assert body[hdr["dw"] * hdr["dh"] * 2:][:2] == b"\xff\xd8", "JPEG follows the depth grid"
+assert abs(g[:, g.shape[1] // 2 + 2:] - 2).max() < 2e-3, "wall 2 m ahead on the confident half"
+assert (g[:, :g.shape[1] // 2 - 2] == 0).all(), "low-confidence half is a hole"
+assert ll.handle_lidar("P", 1, payload) is None, "same pose again: not a keyframe"
+ll.remember_pose("P", 2, pose_T(0.3, 0, 0), K, None, (W, H))
+assert ll.handle_lidar("P", 2, payload) is not None, "moved 30 cm: new patch"
+assert ll.handle_lidar("P", 3, payload) is None, "no pose for frame 3 -> skipped"
+assert ll.stats["P"]["lidar"] == 4 and ll.stats["P"]["patches"] == 2 and ll.stats["P"]["skip_nopose"] == 1
 
 # 6. guided upsampling: a depth step that lines up with an image edge stays sharp at image resolution
 from gpu_link import upsample_depth
@@ -109,11 +115,9 @@ assert up.shape == (392, 518) and ok2.mean() > 0.95
 mid = np.abs(up[:, 250:268] - 2.5) < 0.4                     # blended pixels would sit between 2 and 3
 assert mid.mean() < 0.02, f"{mid.mean():.3f} of the pixels at the edge are blended"
 assert abs(up[:, :250] - 2).max() < 1e-3 and abs(up[:, 268:] - 3).max() < 1e-3
-# whole LiDAR frame budget: two phones at 4 fps leaves ~120 ms per frame on one core
+# whole LiDAR frame budget
 ll2 = GpuLink("unused", None, None)
-depth3 = (2.0 + 0.3 * np.sin(np.arange(DW) / 9))[None, :].repeat(DH, 0).astype(np.float32)   # wavy wall: few duplicate voxels
-payload3 = struct.pack("<HH", DW, DH) + depth3.tobytes() + np.full((DH, DW), 2, np.uint8).tobytes() + fake_jpeg("L", 0.5)
 ll2.remember_pose("P", 1, T0, K, None, (W, H))
-t0 = time.time(); out3 = ll2.handle_lidar("P", 1, payload3); dt3 = time.time() - t0
-assert out3 is not None and len(out3[2]) > 50_000, len(out3[2])
-print(f"lidar ok (upsample 256x192 -> 518x392 in {dt * 1000:.0f} ms; full frame {dt3 * 1000:.0f} ms -> {len(out3[2])} pts)")
+t0 = time.time(); out3 = ll2.handle_lidar("P", 1, payload); dt3 = time.time() - t0
+assert out3 is not None
+print(f"lidar ok (upsample 256x192 -> 518x392 in {dt * 1000:.0f} ms; patch {dt3 * 1000:.0f} ms, {len(out3) // 1000} kB)")

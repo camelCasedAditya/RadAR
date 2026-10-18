@@ -66,6 +66,9 @@ function responder(id) {
   const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color }));
   scene.add(trail);
 
+  const patches = new THREE.Group();   // LiDAR photo patches (meshes) and their dot twins
+  scene.add(patches);
+
   const ptsGeo = new THREE.BufferGeometry();
   ptsGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_POINTS * 3), 3));
   ptsGeo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(MAX_POINTS * 3), 3, true));
@@ -87,7 +90,7 @@ function responder(id) {
   r = { id, color, marker, arrow, trail, trailPts: [], cloud, ptsN: 0, ptsHead: 0,
         img: el.querySelector("img"), meta: el.querySelector(".meta"), imgURL: null,
         canvas: el.querySelector("canvas"), feed: el, decoder: null, videoTimes: [], mapLag: null,
-        pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0 };
+        pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0, patches, patchN: 0 };
   responders.set(id, r);
   return r;
 }
@@ -152,6 +155,82 @@ function onPoints(id, payload) {
   r.ptsFrames++;
 }
 
+// ---------- LiDAR patches: the photo draped over its depth (protocol kind 5) ----------
+let photosOn = true;                   // Surface button: textured patches, or their vertices as dots
+
+function f16(h) {                      // IEEE half -> float (no Float16Array in every browser yet)
+  const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+  return e === 0 ? s * m * 2 ** -24 : e === 31 ? (m ? NaN : s * Infinity) : s * (1 + m / 1024) * 2 ** (e - 15);
+}
+
+async function onPatch(id, payload) {
+  const r = responder(id);
+  const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const hl = dv.getUint32(0, true);
+  const h = JSON.parse(new TextDecoder().decode(payload.subarray(4, 4 + hl)));
+  const { dw, dh, s } = h, n = dw * dh;
+  const depth = new Float32Array(n);
+  for (let i = 0; i < n; i++) depth[i] = f16(dv.getUint16(4 + hl + i * 2, true));
+  const jpeg = payload.subarray(4 + hl + n * 2);
+  const bitmap = await createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }));
+
+  // vertices: unproject each grid sample with K (lens of the w x h image), ARKit camera axes (-Z forward)
+  const [fx, fy, cx, cy] = h.K;
+  const pos = new Float32Array(n * 3), uv = new Float32Array(n * 2), col = new Uint8Array(n * 3);
+  const cv = document.createElement("canvas"); cv.width = bitmap.width; cv.height = bitmap.height;
+  const g = cv.getContext("2d", { willReadFrequently: true }); g.drawImage(bitmap, 0, 0);
+  const px = g.getImageData(0, 0, cv.width, cv.height).data;
+  for (let j = 0; j < dh; j++) for (let i = 0; i < dw; i++) {
+    const k = j * dw + i, u = i * s, v = j * s, z = depth[k];
+    pos[k * 3] = (u - cx) / fx * z; pos[k * 3 + 1] = -(v - cy) / fy * z; pos[k * 3 + 2] = -z;
+    uv[k * 2] = u / h.w; uv[k * 2 + 1] = v / h.h;
+    const q = (Math.min(v, cv.height - 1) * cv.width + Math.min(u, cv.width - 1)) * 4;
+    col[k * 3] = px[q]; col[k * 3 + 1] = px[q + 1]; col[k * 3 + 2] = px[q + 2];
+  }
+  // triangles only where all four corners have depth and agree within 5% (no rubber sheets over edges)
+  const idx = [];
+  for (let j = 0; j < dh - 1; j++) for (let i = 0; i < dw - 1; i++) {
+    const a = j * dw + i, b = a + 1, c = a + dw, d = c + 1;
+    const z0 = depth[a], z1 = depth[b], z2 = depth[c], z3 = depth[d];
+    if (!(z0 > 0 && z1 > 0 && z2 > 0 && z3 > 0)) continue;
+    const lo = Math.min(z0, z1, z2, z3), hi = Math.max(z0, z1, z2, z3);
+    if (hi > lo * 1.05) continue;
+    idx.push(a, c, b, b, c, d);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3, true));
+  geo.setIndex(idx);
+  geo.applyMatrix4(_m.fromArray(h.T));                 // camera -> world (column-major, same as THREE)
+
+  const tex = new THREE.Texture(bitmap);
+  tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace; tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter; tex.needsUpdate = true;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  mesh.visible = photosOn;
+  const dots = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.012, vertexColors: true }));   // sprites alias badly on a regular grid
+  dots.visible = !photosOn;
+  r.patches.add(mesh); r.patches.add(dots);
+  r.patchN++;
+}
+
+const surfaceBtn = document.getElementById("surface");
+surfaceBtn.onclick = () => {
+  photosOn = !photosOn;
+  surfaceBtn.textContent = `Surface: ${photosOn ? "photos" : "dots"}`;
+  surfaceBtn.setAttribute("aria-pressed", photosOn);
+  for (const r of responders.values()) for (const o of r.patches.children) o.visible = o.isMesh ? photosOn : !photosOn;
+};
+
+function clearMap() {                                  // relay started a new map file
+  for (const r of responders.values()) {
+    for (const o of r.patches.children) { o.geometry.dispose(); o.material.map?.dispose(); o.material.dispose(); }
+    r.patches.clear(); r.patchN = 0;
+    r.ptsN = r.ptsHead = 0; r.cloud.geometry.setDrawRange(0, 0);
+  }
+}
+
 // ---------- socket ----------
 const conn = document.getElementById("conn");
 let gpu = null;                        // latest status from the GPU worker, via the relay
@@ -159,8 +238,22 @@ const handlers = {
   pose: onPose,
   gpu: (d) => { gpu = { ...d, at: performance.now() }; },
   maplag: (d) => { responder(d.id).mapLag = d; },
+  map_new: () => { clearMap(); loadMaps(); },
 };   // add-on modules register more types here
-window.radar = { scene, responders, responder, handlers, THREE, camera, controls };
+
+function onBinary(b) {                 // one relay binary message (live socket or a saved map file)
+  const kind = b[0], idlen = b[1];
+  const id = new TextDecoder().decode(b.subarray(2, 2 + idlen));
+  const payload = b.subarray(6 + idlen);
+  if (kind === 1) onJpeg(id, payload);
+  else if (kind === 2) onPoints(id, payload);
+  else if (kind === 3 && videoSupported) {
+    const r = responder(id);
+    r.lastSeen = performance.now();
+    onVideo(r, new DataView(b.buffer, b.byteOffset + 2 + idlen, 4).getUint32(0, true), payload);
+  } else if (kind === 5) return onPatch(id, payload);   // async: map loader awaits it
+}
+window.radar = { scene, responders, responder, handlers, onBinary, THREE, camera, controls };
 
 function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/hub`);
@@ -176,20 +269,38 @@ function connect() {
       } else handlers[d.t]?.(d);
       return;
     }
-    const b = new Uint8Array(ev.data);
-    const kind = b[0], idlen = b[1];
-    const id = new TextDecoder().decode(b.subarray(2, 2 + idlen));
-    const payload = b.subarray(6 + idlen);
-    if (kind === 1) onJpeg(id, payload);
-    else if (kind === 2) onPoints(id, payload);
-    else if (kind === 3 && videoSupported) {
-      const r = responder(id);
-      r.lastSeen = performance.now();
-      onVideo(r, new DataView(b.buffer, 2 + idlen, 4).getUint32(0, true), payload);
-    }
+    onBinary(new Uint8Array(ev.data));
   };
 }
 connect();
+
+// ---------- saved maps (relay: GET /maps, GET /maps/<name>, POST /maps/new) ----------
+const mapsBox = document.getElementById("mapsbox"), mapsBtn = document.getElementById("maps");
+async function loadMaps() {
+  const d = await (await fetch("/maps")).json();
+  document.getElementById("maps-current").textContent = `recording: ${d.current}`;
+  document.getElementById("maps-list").innerHTML = d.maps.map(m =>
+    `<li><span>${m.name}<br><span class="meta">${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB</span></span>
+     <button data-name="${m.name}">Load</button></li>`).join("");
+  for (const b of document.querySelectorAll("#maps-list button")) b.onclick = () => loadMap(b.dataset.name, b);
+}
+async function loadMap(name, btn) {
+  btn.textContent = "loading…"; btn.disabled = true;
+  const buf = new Uint8Array(await (await fetch(`/maps/${name}`)).arrayBuffer());
+  const dv = new DataView(buf.buffer);
+  for (let pos = 0; pos + 4 <= buf.length;) {           // u32 len | binary message
+    const len = dv.getUint32(pos, true);
+    await onBinary(buf.subarray(pos + 4, pos + 4 + len));
+    pos += 4 + len;
+  }
+  btn.textContent = "loaded"; btn.disabled = false;
+}
+mapsBtn.onclick = () => {
+  mapsBox.hidden = !mapsBox.hidden;
+  mapsBtn.setAttribute("aria-pressed", !mapsBox.hidden);
+  if (!mapsBox.hidden) loadMaps();
+};
+document.getElementById("maps-new").onclick = async () => { await fetch("/maps/new", { method: "POST" }); };
 
 // ---------- tint + follow + status ----------
 // Tint: colour each responder's points with their marker colour instead of camera colour,
@@ -247,7 +358,7 @@ setInterval(() => {
     const vfps = r.videoTimes.length / 2;
     const lag = r.mapLag ? `map lag ${r.mapLag.lag.toFixed(1)}s${r.mapLag.queued ? ` (${r.mapLag.queued} queued)` : ""}` : "map waiting";
     r.meta.textContent = `video ${vfps.toFixed(0)} fps · ${lag}`;
-    return `<span class="${stale ? "warn" : ""}">${r.id}: ${stale ? `lost ${age.toFixed(0)}s` : `pose ${fps.toFixed(0)} fps`}, video ${vfps.toFixed(0)} fps, ${lag}, ${(r.ptsN / 1000).toFixed(0)}k pts</span>`;
+    return `<span class="${stale ? "warn" : ""}">${r.id}: ${stale ? `lost ${age.toFixed(0)}s` : `pose ${fps.toFixed(0)} fps`}, video ${vfps.toFixed(0)} fps, ${lag}, ${r.patchN ? `${r.patchN} patches` : `${(r.ptsN / 1000).toFixed(0)}k pts`}</span>`;
   }).join("") || "<span>waiting for responders…</span>";
   const g = gpu && now - gpu.at < 6000;
   status.innerHTML += g ? `<span>GPU ${gpu.fps} fps · ${gpu.mem_gb} GB</span>` : `<span class="warn">GPU offline</span>`;

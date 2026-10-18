@@ -35,6 +35,8 @@ VOXEL = 0.01                 # m; point spacing: one point per cube within a fra
 CELL = 0.04                  # m; a cell is closed to later frames once any frame put a point in it (see place)
 MIN_BRIGHTNESS = 12          # mean grey level below which a map frame is treated as a dead camera
 LIDAR_CONF = 2               # ARKit depth confidence to keep (0 low, 1 medium, 2 high)
+PATCH_STRIDE = 3             # LiDAR patch mesh: one vertex per 3 image pixels (173x131 for 518x392)
+KEY_MOVE, KEY_TURN = 0.25, np.radians(15)   # a new patch once the camera moved/turned this much
 
 
 def pack(header: dict, payload: bytes = b"") -> bytes:
@@ -163,6 +165,7 @@ class GpuLink:
         self.seen: set[int] = set()                      # occupied voxels, all phones. ponytail: ~70 B each in a Python set, ~1 GB at 15M points; move to a numpy hash if sessions run long
         self.aligners: dict[str, Aligner] = {}
         self.segments: dict[str, int] = {}
+        self.keyposes: dict[str, tuple] = {}             # rid -> (R, p) of the last LiDAR patch
 
     def remember_pose(self, rid, f, T, K=None, fp=None, wh=(518, 392)):
         p = self.poses.setdefault(rid, {})
@@ -172,7 +175,7 @@ class GpuLink:
 
     def count(self, rid, key, n=1):
         st = self.stats.setdefault(rid, {"in": 0, "sent": 0, "back": 0, "pts": 0, "skip_nopose": 0, "skip_scale": 0, "new_segment": 0,
-                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0, "dark": 0, "fp_scale": 0, "lidar": 0})
+                                                "no_depth": 0, "short_travel": 0, "all_seen": 0, "dropped_by_worker": 0, "dark": 0, "fp_scale": 0, "lidar": 0, "patches": 0})
         st[key] += n
 
     def print_stats(self):
@@ -186,7 +189,7 @@ class GpuLink:
             print(f"map {rid}: {st['in']} in, {st['sent']} sent, {st['back']} back, {st['pts']} new pts "
                   f"(no pose {st['skip_nopose']}, learning scale {st['skip_scale']}: short travel {st['short_travel']}, "
                   f"no depth {st['no_depth']}, new segments {st['new_segment']}; already mapped {st['all_seen']}; "
-                  f"dropped by worker {st['dropped_by_worker']}; dark frames skipped {st['dark']}; scale from features {st['fp_scale']}; lidar {st['lidar']}); "
+                  f"dropped by worker {st['dropped_by_worker']}; dark frames skipped {st['dark']}; scale from features {st['fp_scale']}; lidar {st['lidar']} -> {st['patches']} patches); "
                   f"queued {len(self.queue.get(rid, ()))}, in flight {len(self.inflight.get(rid, {}))}, "
                   f"link {'up' if self.ws else 'down'}", flush=True)
             for k in st:
@@ -251,6 +254,7 @@ class GpuLink:
     async def reset(self, rid):
         """Phone (re)started: its ARKit origin moved, so drop the lingbot sequence and alignment."""
         self.poses.pop(rid, None)
+        self.keyposes.pop(rid, None)
         self.aligners.pop(rid, None)
         self.scale.pop(rid, None)
         self.queue.pop(rid, None)
@@ -311,18 +315,35 @@ class GpuLink:
             self.count(rid, "skip_nopose")
             return None
         T, K, _, (w, h) = entry
+        if not self.is_keyframe(rid, T):
+            return None
         dw, dh = struct.unpack_from("<HH", payload, 0)
         n = dw * dh
         depth = np.frombuffer(payload, "<f4", n, offset=4).reshape(dh, dw)
         conf = np.frombuffer(payload, np.uint8, n, offset=4 + 4 * n).reshape(dh, dw)
-        rgb = np.asarray(Image.open(io.BytesIO(payload[4 + 5 * n:])).convert("RGB"))
+        jpeg = payload[4 + 5 * n:]
+        rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
         depth, keep = upsample_depth(depth, conf, rgb)            # depth at the image's resolution
         ih, iw = depth.shape
-        fx, fy, cx, cy = K[0] * iw / w, K[1] * ih / h, K[2] * iw / w, K[3] * ih / h   # lens for that grid
-        v, u = np.mgrid[0:ih, 0:iw]
-        z = depth[keep]
-        cam = np.stack([(u[keep] - cx) / fx * z, (v[keep] - cy) / fy * z, z], 1)
-        return self.place(rid, f, cam, rgb[keep], T)
+        # Textured patch for the hub: the photo draped over a mesh sampled every PATCH_STRIDE pixels.
+        # Depth stays in metres along the camera axis; the hub unprojects with K (scaled to w x h).
+        g = np.where(keep, depth, 0)[::PATCH_STRIDE, ::PATCH_STRIDE].astype("<f2")
+        hdr = {"T": list(map(float, T)), "K": list(map(float, K)), "w": w, "h": h,
+               "dw": g.shape[1], "dh": g.shape[0], "s": PATCH_STRIDE}
+        self.count(rid, "patches")
+        return pack(hdr, g.tobytes() + bytes(jpeg))
+
+    def is_keyframe(self, rid, T):
+        """True (and remembered) when the camera moved KEY_MOVE or turned KEY_TURN since the last patch."""
+        R, p = arkit_Rp(T)
+        last = self.keyposes.get(rid)
+        if last is not None:
+            R0, p0 = last
+            cos = (np.trace(R0.T @ R) - 1) / 2
+            if np.linalg.norm(p - p0) < KEY_MOVE and np.arccos(np.clip(cos, -1, 1)) < KEY_TURN:
+                return False
+        self.keyposes[rid] = (R, p)
+        return True
 
     def place(self, rid, seq, cam, col, T):
         """Camera-space metric points (OpenCV axes) -> world points with the ARKit pose, one per unseen voxel."""

@@ -6,3 +6,4 @@ server/sessions/
 # teammate's lingbot worker, copied from the RunPod volume for EC2 setup; not ours to commit
 server/ec2/worker.py
 build/
+server/maps/

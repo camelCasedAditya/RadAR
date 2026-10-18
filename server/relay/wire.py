@@ -7,6 +7,7 @@ KIND_JPEG = 1
 KIND_POINTS = 2
 KIND_H264 = 3     # payload: flags u8 (bit 0 = keyframe), then Annex-B H.264 access unit
 KIND_DEPTH = 4    # payload: w u16, h u16, depth f32[w*h] metres, conf u8[w*h] (ARKit 0/1/2), then the map JPEG
+KIND_PATCH = 5    # payload: u32 hlen, JSON {T, K, w, h, dw, dh, s}, depth f16[dw*dh] (0 = hole), then the JPEG
 
 
 def pack_bin(kind: int, rid: str, f: int, payload: bytes) -> bytes:
