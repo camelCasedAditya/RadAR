@@ -48,6 +48,12 @@ async def main():
     # every phone and the other hub, not itself. hr / talk ride the generic JSON path.
     pb = await websockets.connect(U + "/phone/B")
     await pb.send(json.dumps({"t": "hello", "name": "B"}))
+    # UWB pairing: every phone gets the phone list; a Nearby Interaction token goes only to its addressee
+    is_t = lambda t: lambda m: isinstance(m, str) and json.loads(m)["t"] == t
+    for p in (ph, pb):                         # A also has the list from its own connect queued
+        await recv_until(p, lambda m: is_t("phones")(m) and json.loads(m)["ids"] == ["A", "B"])
+    await pb.send(json.dumps({"t": "nitoken", "to": "A", "token": "dG9rZW4="}))
+    assert json.loads(await recv_until(ph, is_t("nitoken"))) == {"t": "nitoken", "from": "B", "token": "dG9rZW4="}
     await asyncio.sleep(0.2)
     pcm = bytes(1280)
     await ph.send(json.dumps({"t": "hr", "bpm": 92}))
@@ -67,12 +73,8 @@ async def main():
         assert False, ("phone A got", m[:8])
     except asyncio.TimeoutError:
         pass
-    # peer positions: a pose from A reaches B as {"t": "peer", "id": "A", "p": [x, y, z]} (the relay sends 5 Hz)
-    await asyncio.sleep(0.25)
-    await ph.send(json.dumps({"t": "pose", "f": 99, "ts": 9.9, "T": pose_T(1.0, 2.0, 0)}))
-    peer = json.loads(await recv_until(pb, lambda m: isinstance(m, str) and json.loads(m)["t"] == "peer"))
-    assert peer["id"] == "A" and peer["p"] == [1.0, 1.4, 2.0], peer
     await pb.close()
+    await recv_until(ph, lambda m: is_t("phones")(m) and json.loads(m)["ids"] == ["A"])
 
     # Enhance (local mode, no S3): unknown map -> 409; a recorded map is queued, the background job
     # runs enhance.py, and this points-only session ends "failed: needs a LiDAR scan" via the sidecar.

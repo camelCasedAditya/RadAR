@@ -106,7 +106,7 @@ function responder(id) {
     <span class="hr" hidden aria-live="off"></span><div class="peers"></div></div>`;
   side.appendChild(el);
 
-  r = { id, color, marker, arrow, head, hrEl: el.querySelector(".hr"), peersEl: el.querySelector(".peers"), hrAt: 0, mic: el.querySelector(".mic"), trail, pathN: 0, pathLast: null, cloud, ptsN: 0, ptsHead: 0,
+  r = { id, color, marker, arrow, head, hrEl: el.querySelector(".hr"), peersEl: el.querySelector(".peers"), uwb: {}, hrAt: 0, mic: el.querySelector(".mic"), trail, pathN: 0, pathLast: null, cloud, ptsN: 0, ptsHead: 0,
         img: el.querySelector("img"), meta: el.querySelector(".meta"), imgURL: null,
         canvas: el.querySelector("canvas"), feed: el, decoder: null, videoTimes: [], mapLag: null,
         pose: null, lastSeen: 0, poseTimes: [], ptsFrames: 0, patches, patchN: 0, patchByF: new Map() };
@@ -278,6 +278,7 @@ const handlers = {
     r.head.rotation.set(d.pitch, d.yaw - r.marker.rotation.y, 0);
     r.head.visible = true;
   },
+  uwb: (d) => { responder(d.id).uwb[d.peer] = { distance: d.distance, angle: d.angle, at: performance.now() }; },
   talk: (d) => { talking[d.id] = d.on; if (d.id !== "hub") responder(d.id).mic.hidden = !d.on; },
   state: (d) => { for (const [id, msgs] of Object.entries(d.responders)) for (const m of Object.values(msgs)) handlers[m.t]?.({ ...m, id }); },
 };   // add-on modules register more types here
@@ -661,18 +662,21 @@ setInterval(() => {
   status.innerHTML += g ? `<span>GPU ${gpu.fps} fps · ${gpu.mem_gb} GB</span>` : `<span class="warn">GPU offline</span>`;
 }, 500);
 
-// Other responders on each feed: an arrow toward each one and its distance. Up = where this responder's
-// camera faces, right = their right (top-down, from the yaw-only markers); same layout as the app.
-function peerArrow(r, o) {
-  const d = o.marker.position.clone().sub(r.marker.position), y = r.marker.rotation.y;
-  const ahead = -d.x * Math.sin(y) - d.z * Math.cos(y), right = d.x * Math.cos(y) - d.z * Math.sin(y);
-  const a = Math.atan2(right, ahead);
-  return `<span class="peer" style="left:${50 + 40 * Math.sin(a)}%;top:${50 - 38 * Math.cos(a)}%;color:#${o.color.getHexString()}">`
-    + `<i style="transform:rotate(${a}rad)">▲</i>${o.id} ${d.length().toFixed(1)} m</span>`;
+// Other responders on each feed: an arrow toward each one and its distance, as that phone measures them
+// over UWB (protocol `uwb`). Up = where this responder's camera faces, right = their right; same as the app.
+// A peer with distance but no direction yet is listed along the top.
+function peerArrow(r, peer, u, i) {
+  const color = `#${(responders.get(peer)?.color ?? new THREE.Color("#fff")).getHexString()}`;
+  const [x, y] = u.angle == null ? [50, 10 + 12 * i] : [50 + 40 * Math.sin(u.angle), 50 - 38 * Math.cos(u.angle)];
+  return `<span class="peer" style="left:${x}%;top:${y}%;color:${color}">`
+    + `<i style="transform:rotate(${u.angle ?? 0}rad)">${u.angle == null ? "◎" : "▲"}</i>${peer} ${u.distance.toFixed(1)} m</span>`;
 }
 setInterval(() => {
-  const now = performance.now(), live = [...responders.values()].filter(r => r.marker.visible && now - r.lastSeen < 5000);
-  for (const r of responders.values()) r.peersEl.innerHTML = live.includes(r) ? live.filter(o => o !== r).map(o => peerArrow(r, o)).join("") : "";
+  const now = performance.now();
+  for (const r of responders.values()) {
+    const fresh = Object.entries(r.uwb).filter(([, u]) => now - u.at < 3000).sort();
+    r.peersEl.innerHTML = fresh.map(([peer, u], i) => peerArrow(r, peer, u, i)).join("");
+  }
 }, 100);
 
 renderer.setAnimationLoop(() => {

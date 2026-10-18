@@ -25,8 +25,7 @@ HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
 MAPS_DIR = pathlib.Path(__file__).resolve().parents[1] / "maps"
 
 hubs: set[WebSocket] = set()
-phones: dict[str, WebSocket] = {}  # id -> socket; phones receive only call audio and `peer` positions
-peer_sent: dict[str, float] = {}     # id -> monotonic time its position last went to the other phones
+phones: dict[str, WebSocket] = {}  # id -> socket; phones receive only call audio, `phones` and UWB `nitoken`s
 state: dict[str, dict] = {}          # id -> {msg type -> latest msg}
 last_jpeg: dict[str, bytes] = {}     # id -> latest jpeg binary message
 gop: dict[str, list[bytes]] = {}     # id -> latest h264 keyframe + frames since, for late hubs
@@ -236,7 +235,7 @@ async def send_hubs(msg, skip=None):
 
 
 async def send_phones(msg, skip=None):
-    """Call audio / peer positions to every phone but the sender, in parallel: a phone on a stalled
+    """Call audio / the phone list to every phone but the sender, in parallel: a phone on a stalled
     network loses this message instead of holding up everyone else."""
     async def one(rid, ws):
         try:
@@ -247,6 +246,13 @@ async def send_phones(msg, skip=None):
             if phones.get(rid) is ws:
                 phones.pop(rid)
     await asyncio.gather(*(one(rid, ws) for rid, ws in list(phones.items()) if rid != skip))
+
+
+async def send_phones_to(ws, msg):
+    try:
+        await asyncio.wait_for(ws.send_text(msg), 1)
+    except Exception:
+        pass
 
 
 async def on_points(rid, f, xyz, rgb, lag, queued):
@@ -279,6 +285,7 @@ def make_app(gpu_url=None, conf_min=2.0):
     async def phone(ws: WebSocket, rid: str):
         await ws.accept()
         phones[rid] = ws
+        await send_phones(json.dumps({"t": "phones", "ids": sorted(phones)}))   # each pairs with the others over UWB
         try:
             while True:
                 m = await ws.receive()
@@ -286,12 +293,14 @@ def make_app(gpu_url=None, conf_min=2.0):
                     break
                 if m.get("text") is not None:
                     d = json.loads(m["text"])
+                    if d["t"] == "nitoken":             # UWB pairing token for one other phone, not for hubs
+                        to = phones.get(d.get("to"))
+                        if to:
+                            await send_phones_to(to, json.dumps({"t": "nitoken", "from": rid, "token": d["token"]}))
+                        continue
                     d["id"] = rid
                     state.setdefault(rid, {})[d["t"]] = d
                     await send_hubs(json.dumps(d))
-                    if d["t"] == "pose" and time.monotonic() - peer_sent.get(rid, 0) >= 0.2:   # 5 Hz is plenty for arrows
-                        peer_sent[rid] = time.monotonic()
-                        await send_phones(json.dumps({"t": "peer", "id": rid, "p": d["T"][12:15]}), skip=rid)
                     if link and d["t"] == "hello":
                         await link.reset(rid)
                     elif link and d["t"] == "pose":
@@ -323,6 +332,7 @@ def make_app(gpu_url=None, conf_min=2.0):
         finally:
             if phones.get(rid) is ws:
                 phones.pop(rid)
+                await send_phones(json.dumps({"t": "phones", "ids": sorted(phones)}))
 
     @app.websocket("/hub")
     async def hub(ws: WebSocket):

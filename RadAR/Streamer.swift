@@ -33,7 +33,8 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     private var phoneYaw = 0.0                   // camera heading in the ARKit world frame, as the hub computes it
     private var bpm: Int?
     private var audioSeq: UInt32 = 0
-    private var peers: [String: (p: simd_float3, at: TimeInterval)] = [:]   // other responders, from the relay's `peer`
+    private let uwb: UwbTracker                  // other responders over UWB (Uwb.swift)
+    private var cameraT: simd_float4x4?
 
     static let width = 518  // lingbot-map native width; height is rounded to a multiple of 14
     // lingbot-map is a streaming VIDEO model: each frame leans on the frames just before it, so it
@@ -52,6 +53,7 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         queue = q
         heart = HeartRate(queue: q)
         head = HeadTracker(queue: q)
+        uwb = UwbTracker(queue: q, ar: session)
         super.init()
     }
 
@@ -71,6 +73,12 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
                     self.audioSeq &+= 1
                     self.emit(.data(Wire.audioFrame(id: self.rid, seq: self.audioSeq, pcm: pcm)))
                 }
+            }
+            uwb.me = id
+            uwb.cameraT = { [weak self] in self?.cameraT }
+            uwb.sendToken = { [weak self] to, token in self?.emit(.string(Wire.json(["t": "nitoken", "to": to, "token": token]))) }
+            uwb.onReport = { [weak self] peer, distance, angle in
+                self?.emit(.string(Wire.json(["t": "uwb", "peer": peer, "distance": distance, "angle": angle ?? NSNull()])))
             }
             heart.start()
             head.start()
@@ -95,6 +103,7 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         voice.stop()
         queue.async { [self] in
             bpm = nil
+            uwb.stop()
             base = nil
             encoder.stop()
             ws?.cancel(with: .goingAway, reason: nil)
@@ -129,9 +138,11 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
                 case .failure(let e):
                     self.reconnect(because: "receive: \(e.localizedDescription)")
                 case .success(let m):
-                    if case .string(let s) = m, let d = try? JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any],
-                       d["t"] as? String == "peer", let id = d["id"] as? String, let p = d["p"] as? [Double], p.count == 3 {
-                        self.peers[id] = (simd_float3(Float(p[0]), Float(p[1]), Float(p[2])), ProcessInfo.processInfo.systemUptime)
+                    if case .string(let s) = m, let d = try? JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any] {
+                        if d["t"] as? String == "phones", let ids = d["ids"] as? [String] { self.uwb.setPhones(ids) }
+                        if d["t"] as? String == "nitoken", let from = d["from"] as? String, let token = d["token"] as? String {
+                            self.uwb.received(token: token, from: from)
+                        }
                     }
                     if case .data(let d) = m, d.count > 6, d[d.startIndex] == 7 {
                         let b = [UInt8](d), idlen = Int(b[1])
@@ -212,7 +223,8 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
             }
         }
 
-        if f % 3 == 0 { onPeers?(peerArrows(T)) }   // 10 Hz is smooth enough for arrows
+        cameraT = T
+        if f % 3 == 0 { onPeers?(peerArrows()) }   // 10 Hz is smooth enough for arrows
 
         videoTimes.removeAll { frame.timestamp - $0 > 2 }
         mapTimes.removeAll { frame.timestamp - $0 > 2 }
@@ -221,15 +233,11 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
                   + (lastError.isEmpty ? "" : "\nlast drop: \(lastError)"))
     }
 
-    /// Arrow + distance to each other responder heard from in the last 5 s. Angle 0 = straight ahead
-    /// (camera heading on the floor plane), + = to the right; distance is straight-line metres.
-    private func peerArrows(_ T: simd_float4x4) -> [PeerArrow] {
-        let me = simd_make_float3(T.columns.3), now = ProcessInfo.processInfo.systemUptime
-        let f = simd_normalize(simd_float3(-T.columns.2.x, 0, -T.columns.2.z)), right = simd_float3(-f.z, 0, f.x)
-        return peers.filter { now - $0.value.at < 5 }.sorted { $0.key < $1.key }.map { id, v in
-            let d = v.p - me
-            return PeerArrow(id: id, angle: Double(atan2(simd_dot(d, right), simd_dot(d, f))), distance: Double(simd_length(d)))
-        }
+    /// Arrow + distance to each other responder UWB measured in the last 3 s.
+    private func peerArrows() -> [PeerArrow] {
+        let now = ProcessInfo.processInfo.systemUptime
+        return uwb.latest.filter { now - $0.value.at < 3 }.sorted { $0.key < $1.key }
+            .map { PeerArrow(id: $0.key, angle: $0.value.angle, distance: $0.value.distance) }
     }
 
     /// Feature points projected into the map image: [u, v, depth] with depth in metres along the camera axis.
@@ -305,6 +313,6 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
 
 nonisolated struct PeerArrow: Identifiable, Sendable {
     let id: String
-    let angle: Double        // radians, 0 = ahead, + = right
+    let angle: Double?       // radians, 0 = ahead, + = right; nil = UWB has distance but no direction yet
     let distance: Double     // metres
 }
