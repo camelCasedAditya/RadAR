@@ -96,7 +96,7 @@ class GpuLink:
 
     def count(self, rid, key, n=1):
         st = self.stats.setdefault(rid, {"in": 0, "sent": 0, "back": 0, "pts": 0, "skip_nopose": 0, "skip_scale": 0, "new_segment": 0,
-                                                "no_depth": 0, "short_travel": 0})
+                                                "no_depth": 0, "short_travel": 0, "all_seen": 0})
         st[key] += n
 
     def print_stats(self):
@@ -109,7 +109,7 @@ class GpuLink:
                 continue
             print(f"map {rid}: {st['in']} in, {st['sent']} sent, {st['back']} back, {st['pts']} new pts "
                   f"(no pose {st['skip_nopose']}, learning scale {st['skip_scale']}: short travel {st['short_travel']}, "
-                  f"no depth {st['no_depth']}, new segments {st['new_segment']}); "
+                  f"no depth {st['no_depth']}, new segments {st['new_segment']}; already mapped {st['all_seen']}); "
                   f"queued {len(self.queue.get(rid, ()))}, in flight {len(self.inflight.get(rid, {}))}, "
                   f"link {'up' if self.ws else 'down'}", flush=True)
             for k in st:
@@ -203,6 +203,7 @@ class GpuLink:
         _, first = np.unique(keys, return_index=True)   # one point per voxel within the frame
         fresh = np.array([i for i in first if keys[i] not in self.seen], dtype=np.int64)
         if not len(fresh):
+            self.count(rid, "all_seen")
             return None
         self.seen.update(keys[fresh].tolist())
         xyz, col = xyz[fresh], col[fresh]
