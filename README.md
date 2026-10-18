@@ -1,14 +1,26 @@
 # RadAR
 
-Live 3D situational awareness for first responders. Phones stream camera + ARKit pose to a relay on the MacBook; the relay sends frames to a GPU worker on RunPod, which turns them into depth with [lingbot-map](https://github.com/Robbyant/lingbot-map); the relay aligns that to ARKit's metric frame; the hub page shows both responders, their video, and the growing 3D map.
+Live 3D situational awareness for first responders. Phones stream camera + ARKit pose over HTTPS to a relay on an AWS EC2 GPU box; the relay sends frames to the lingbot-map worker on the same box, which turns them into depth with [lingbot-map](https://github.com/Robbyant/lingbot-map); the relay aligns that to ARKit's metric frame; the hub page shows both responders, their video, and the growing 3D map.
 
 Design: `docs/superpowers/specs/2026-10-17-radar-design.md`. Wire format: `server/relay/protocol.md`.
 
-## Run
+## Run (AWS EC2, current)
+
+Everything lives in AWS us-east-2: a `radar-live` g6e.xlarge (L40S) runs the lingbot worker, the relay and the hub behind Caddy with an automatic Let's Encrypt certificate on its Elastic IP (`https://18-227-138-16.sslip.io`); a separate `radar-enhance` g6e.xlarge runs enhance jobs on demand (see **Enhanced maps**); session files live in S3. The boxes authenticate to S3 and each other through instance roles, so no access keys are stored anywhere. Admin access is through AWS Systems Manager (no SSH port). After `aws login`:
+```bash
+server/aws/live.sh status    # state, hub + phone URLs, relay health
+server/aws/live.sh up        # start the stopped box (hub is up ~3 min later: boot, worker, 3-model warm-up)
+server/aws/live.sh down      # stop it when done (disk, weights and venv are kept; ~$1.86/hr while running)
+server/aws/live.sh deploy    # upload server/ + hub/ + worker.py to S3 and restart the services (seconds)
+server/aws/live.sh logs      # worker, relay and caddy logs
+```
+Hub: `https://18-227-138-16.sslip.io`. Phones: scan the hub's Connect QR, or enter `wss://18-227-138-16.sslip.io` and a responder ID. The box was created by the AWS MCP from `server/aws/setup_live.sh` (first-boot user-data: venv with torch 2.8 cu128, lingbot-map, FlashInfer, the weights, Caddy, two systemd services that pull the latest code from `s3://<bucket>/code/live.tgz` at every boot). `server/ec2/worker.py` is the teammate's worker; it's gitignored, get a copy from them, `deploy` ships it. Ids and the hostname are in `server/aws/live.env`.
+
+### Previous hosting (kept for reference)
 
 **1. GPU worker.** Either option runs the same lingbot worker on `127.0.0.1:8010` on the GPU box; the relay reaches it through an SSH tunnel.
 
-*RunPod (current).* Measured streaming inference: L40S ~52 ms/frame (two phones at 6 map fps), A40 ~112 ms/frame (one phone). On a PyTorch 2.8 / CUDA 12.8 pod with SSH over exposed TCP (add your Mac's key under RunPod Settings → SSH Public Keys first), from the repo root:
+*RunPod.* Measured streaming inference: L40S ~52 ms/frame (two phones at 6 map fps), A40 ~112 ms/frame (one phone). On a PyTorch 2.8 / CUDA 12.8 pod with SSH over exposed TCP (add your Mac's key under RunPod Settings → SSH Public Keys first), from the repo root:
 ```bash
 scp -P <port> server/ec2/worker.py server/ec2/setup_runpod.sh server/ec2/start_worker_runpod.sh root@<ip>:/workspace/
 ssh -p <port> root@<ip> 'mkdir -p /workspace/rad-ar && mv /workspace/worker.py /workspace/rad-ar/ && bash /workspace/setup_runpod.sh'
@@ -58,6 +70,8 @@ Hub: `https://<pod-id>-8888.proxy.runpod.net`. Phones: `wss://<pod-id>-8888.prox
 
 **S3 copy.** With `RADAR_S3_BUCKET` set (plus AWS credentials and `AWS_DEFAULT_REGION`), the relay streams every recording to `s3://<bucket>/sessions/<name>` in 8 MB parts as it records, finishes it with a `<name>.json` sidecar when the session ends, and uploads any local file that never made it up at the next start. The Maps panel lists local and S3 sessions together (☁), and Load/Replay of an S3-only session fetches straight from S3 through a one-hour presigned link, so sessions outlive the pod. Sessions that mapped nothing are not uploaded. The bucket is `radar-dubhacks-784917519323` in us-east-2, private, encrypted, with a CORS rule for GET and a rule that aborts stale multipart uploads after 2 days. The pod uses the IAM user `radar-pod` (access limited to that bucket) via `/workspace/radar-s3.env`, which `radar_up.sh` sources; recreate that file with `aws iam create-access-key --user-name radar-pod` if the pod is ever rebuilt. On the Mac, `eval "$(aws configure export-credentials --format env)"` then `RADAR_S3_BUCKET=... AWS_DEFAULT_REGION=us-east-2 python server/relay/relay.py ...` does the same.
 
+**Enhanced maps.** A saved map's stored video is 1920×1440 at 30 fps with a pose per frame, far more detail than the live 518-wide patch photos. **✦ Enhance** on a past map queues an offline job (`server/enhance/enhance.py`) that keeps the map exactly as it is and re-textures every LiDAR patch: for each patch it picks the sharpest video frame within 5 frames of the patch (least motion blur), downsizes it to 1280 wide, and stores it with that frame's pose in `<name>.hd` next to the session in S3. The row shows queued/running and then **✦ enhanced**; loading that map streams the sharp photos in after the map and adds an **Original / Enhanced** toggle (the hub projects each patch's vertices into the chosen frame's camera). The job is CPU-only; it runs on the EC2 enhancer box (`server/aws/`) that the relay starts on demand via `RADAR_ENHANCE_INSTANCE` and that stops itself after three idle minutes; `server/aws/enhancer.sh deploy|up|down|status|logs` manages it from the Mac. Without S3 the relay runs the same job locally. Design: `docs/superpowers/specs/2026-10-17-enhanced-maps-design.md`.
+
 The relay sends each phone's frames to the worker as stream `radar-<id>`, unprojects the returned depth, and aligns it to ARKit's metric frame (`server/relay/gpu_link.py`, `align.py`). `--conf` sets the depth-confidence cut (default 1.5).
 
 ## Develop without phones or a GPU
@@ -73,4 +87,5 @@ python session.py replay ../sessions/fake_corridor.jsonl --loop  # terminal 3
 ## Tests
 ```bash
 cd server/relay && python wire.py && python align.py && python test_link.py && python test_queue.py && python test_relay.py
+cd server/enhance && python test_enhance.py     # needs: pip install av pillow
 ```

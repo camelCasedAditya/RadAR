@@ -4,9 +4,9 @@ One relay, two kinds of client, plus an outbound link to the GPU worker. All ove
 
 | Client | Endpoint | Sends | Receives |
 |---|---|---|---|
-| Phone | `/phone/{id}` | text + jpeg binary | nothing |
+| Phone | `/phone/{id}` | text + binary | call audio (kind 7) from the other phones and hubs |
 | GPU worker | — | relay connects out to it (`--gpu`), see `gpu_link.py` | |
-| Hub | `/hub` | nothing | everything, plus `state` on connect |
+| Hub | `/hub` | call audio (kind 7, id `hub`) and `talk` | everything, plus `state` on connect |
 
 `id` is a short responder id, e.g. `A`, `B`.
 
@@ -18,7 +18,9 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 |---|---|---|---|
 | `hello` | `name` | phone | once on connect |
 | `pose` | `f` (frame id, int), `ts` (s, float), `T` (16 floats, column-major 4×4 camera-to-world, metres, ARKit axes: +Y up), `K` ([fx, fy, cx, cy] for the 518-wide map image), `w`, `h`, `fp` (map frames only: ARKit feature points as [u, v, z] pixels in the map image + metric depth, ≤300; the relay reads lingbot depth at these pixels for a per-frame metric scale) | phone | every camera frame (30 Hz). Map JPEGs and video frames reuse the same `f` |
-| `head` | `yaw`, `pitch` (radians, relative to Start) | phone | Module A |
+| `head` | `yaw` (radians, ARKit world frame like the pose: the phone zeroes the AirPods at the first sample, assuming the wearer looks where the chest camera looks), `pitch` (radians, + = looking up) | phone | AirPods head tracking, ~10 Hz. The hub draws a cone on the marker |
+| `hr` | `bpm` | phone | AirPods Pro 3 heart rate (HealthKit workout while streaming), each sample. Hub badge on the video corner |
+| `talk` | `on` (bool) | phone or hub (relay stamps id `hub`) | push-to-talk pressed / released |
 | `uwb` | `peer`, `distance` (m), `direction` ([x,y,z] or null) | phone | Module C |
 | `gps` | `lat`, `lon`, `heading` | phone | Module D |
 | `peer_pose` | `peer`, `T` | phone | Module E |
@@ -31,7 +33,7 @@ Every text message has `t` (type) and `id` (responder). Relay stamps `id` from t
 ## Binary messages
 
 ```
-byte 0      kind     1 = jpeg, 2 = points, 3 = h264, 4 = depth, 5 = patch
+byte 0      kind     1 = jpeg, 2 = points, 3 = h264, 4 = depth, 5 = patch, 7 = audio
 byte 1      idlen
 bytes 2..   id       (idlen bytes, utf-8)
 next 4      f        uint32 little-endian frame id
@@ -43,9 +45,15 @@ rest        payload
 - kind 3 payload (**live video**, 30 fps): `flags` u8 (bit 0 = keyframe), then one H.264 access unit in Annex-B form (start codes). Keyframes carry SPS and PPS first. Same sensor orientation as kind 1. Relay forwards it untouched and replays the latest keyframe group to hubs that connect late.
 - kind 4 payload (**LiDAR map frame**, iPhone Pro only, sent *instead of* kind 1): `w` u16 LE, `h` u16 LE (ARKit scene depth grid, 256×192), `w*h` float32 LE depth in metres, `w*h` uint8 ARKit confidence (0 low, 1 medium, 2 high), then the map JPEG as in kind 1. Relay keeps high-confidence pixels, colours them from the JPEG, and places them with the `pose` of the same `f`; no GPU involved.
 - kind 5 payload (**LiDAR patch**, relay → hub): `hlen` u32 LE, JSON header `{T, K, w, h, dw, dh, s}` (the frame's ARKit pose and lens for the w×h image; a dw×dh grid sampled every `s` pixels), `dw*dh` float16 LE depth in metres along the camera axis (0 = hole), then the map JPEG. The hub drapes the JPEG over a mesh built from the grid, dropping triangles across depth jumps. Sent only on keyframes (camera moved 25 cm or turned 15°). LiDAR phones get patches instead of kind 2 points.
+- kind 7 payload (**call audio**, phone or hub): mono int16 LE PCM, 16 kHz, 40 ms chunks (640 samples), `f` = sequence number. Sent only while push-to-talk is on. The relay forwards a phone's audio to every other phone and every hub, and a hub's audio (id `hub`) to every phone and the other hubs; never back to the talker. Recorded in sessions like everything hubs see, so Replay plays the call.
+
 
 ## Session files (saved maps)
 
 While recording (between `POST /maps/start {name}` and `POST /maps/stop`), everything the relay sends hubs (poses, H.264 video, map JPEGs, points, LiDAR patches, status) is appended to `server/maps/<name>.radar`: the bytes `RADAR2\n`, then records `u32 len | u32 t_ms | u8 type | body` (type 0 = text JSON, 1 = binary message; `len` covers everything after it). A file opens with a `state` message and each phone's latest video keyframe group, so a replay starts decodable like a late-joining hub. `GET /maps` lists files (`{name, bytes, patches, mapped, seconds, where}`) plus the recording state; `GET /maps/<name>` returns a file; `POST /maps/start` (JSON `{name}`) begins a recording, clears the relay's voxel/keyframe state and tells hubs `recording {name, since}` (also sent to a hub on connect, with `name: null` when idle; never recorded); `POST /maps/stop` ends it and returns `{saved: meta}`. The hub's Past maps panel loads a map (only kinds 2 and 5, applied at once), replays a session (every record on its original timeline: video, markers, map growth), downloads it, or deletes it (`DELETE /maps/<name>`). With `RADAR_S3_BUCKET` set, `store.py` streams the file to `s3://<bucket>/sessions/<name>` as it is written and adds `<name>.json` `{patches, mapped, seconds, bytes}` at the end; `GET /maps` merges both places (`where`: local, s3, both) and `GET /maps/<name>` redirects to a presigned S3 URL when the file is not local.
+
+## Enhanced maps
+
+`POST /maps/<name>/enhance` queues an offline job (`server/enhance/enhance.py`) that re-textures a saved map's LiDAR patches from its stored video. Output `<name>.hd`, served by the same `GET /maps/<file>`: a RADAR2 file whose binary records are relay messages of **kind 6** (id, `f` = the patch's frame) with payload `hlen` u32 LE, JSON `{sf, T, K}` (the source frame, its ARKit pose, and its lens normalised to the image so uv = (kx·x/−z + kcx, −ky·y/−z + kcy) in camera coordinates), then the JPEG (1280 wide). The hub swaps the patch's texture and uv for these under **Enhanced**. The sidecar gains `enhanced: {status: queued | running | done | failed, since?, hd?, phones?, patches?, bytes?, seconds?, error?}`, which `GET /maps` reports per map; `done` without `hd` is the retired mesh/splat output and shows Enhance again. With S3 the job is the object `jobs/<name>` that the EC2 enhancer (`enhance_worker.py`, started by the relay via `RADAR_ENHANCE_INSTANCE`) consumes; without S3 the relay runs it locally. 409 when the map is unknown, still recording, or already queued/running. `DELETE /maps/<name>` removes the enhanced file too.
 
 Helpers: `server/relay/wire.py` (`pack_bin`, `unpack_bin`, `pack_points`, `unpack_points`).

@@ -1,0 +1,6 @@
+# The enhance job (server/enhance/enhance.py): CPU only (H.264 decode + JPEG). setup_enhancer.sh
+# installs these into /opt/radar-venv on the EC2 enhancer.
+av
+boto3
+numpy
+pillow

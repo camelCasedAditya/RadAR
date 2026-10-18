@@ -53,7 +53,30 @@ class S3Store:
         return self.s3.generate_presigned_url("get_object", Params={"Bucket": self.bucket, "Key": PREFIX + name}, ExpiresIn=seconds)
 
     def delete(self, name):
-        self.s3.delete_objects(Bucket=self.bucket, Delete={"Objects": [{"Key": PREFIX + name}, {"Key": PREFIX + name + ".json"}]})
+        """Remove a session and everything derived from it (sidecar, enhanced mesh/splat files)."""
+        keys = [{"Key": k} for k in self.keys(PREFIX + name)]
+        if keys:
+            self.s3.delete_objects(Bucket=self.bucket, Delete={"Objects": keys})
+
+    # ---- small synchronous helpers (enhance job, relay enhance endpoint) ----
+    def keys(self, prefix):
+        return [o["Key"] for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
+                for o in page.get("Contents", [])]
+
+    def get_json(self, key):
+        try:
+            return json.loads(self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read())
+        except self.s3.exceptions.NoSuchKey:
+            return None
+
+    def put_json(self, key, obj):
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=json.dumps(obj).encode(), ContentType="application/json")
+
+    def put_file(self, path, key):
+        self.s3.upload_file(str(path), self.bucket, key)
+
+    def get_file(self, key, path):
+        self.s3.download_file(self.bucket, key, str(path))
 
     # ---- background thread ----
     def _run(self):

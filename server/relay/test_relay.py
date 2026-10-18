@@ -3,7 +3,7 @@ phone -> hub routing, late-hub state, and phone frames -> GPU worker -> aligned 
 import asyncio, json, os, subprocess, sys, tempfile, time
 import websockets
 from session import fake, path_point, pose_T
-from wire import KIND_JPEG, KIND_POINTS, pack_bin, unpack_bin, unpack_points
+from wire import KIND_AUDIO, KIND_JPEG, KIND_POINTS, pack_bin, unpack_bin, unpack_points
 
 U = "ws://127.0.0.1:8765"
 SESSION = os.path.join(tempfile.mkdtemp(), "session.jsonl")
@@ -43,7 +43,65 @@ async def main():
     assert "pose" in s["responders"]["A"] and "head" in s["responders"]["A"], s
     assert json.loads(await hub2.recv())["t"] == "recording"
     assert unpack_bin(await hub2.recv())[0] == KIND_JPEG
-    print("relay ok: routing, state, and GPU points path")
+
+    # Voice call: phone audio reaches the other phone and the hubs, never the talker; hub audio reaches
+    # every phone and the other hub, not itself. hr / talk ride the generic JSON path.
+    pb = await websockets.connect(U + "/phone/B")
+    await pb.send(json.dumps({"t": "hello", "name": "B"}))
+    await asyncio.sleep(0.2)
+    pcm = bytes(1280)
+    await ph.send(json.dumps({"t": "hr", "bpm": 92}))
+    assert json.loads(await recv_until(hub, lambda m: isinstance(m, str) and json.loads(m)["t"] == "hr"))["bpm"] == 92
+    await ph.send(pack_bin(KIND_AUDIO, "A", 1, pcm))
+    assert unpack_bin(await asyncio.wait_for(pb.recv(), 5))[:2] == (KIND_AUDIO, "A")
+    await recv_until(hub, lambda m: isinstance(m, bytes) and m[0] == KIND_AUDIO)
+    await hub.send(json.dumps({"t": "talk", "on": True}))
+    await hub.send(pack_bin(KIND_AUDIO, "hub", 1, pcm))
+    for p in (ph, pb):
+        assert unpack_bin(await asyncio.wait_for(p.recv(), 5))[:2] == (KIND_AUDIO, "hub")
+    t = await recv_until(hub2, lambda m: isinstance(m, str) and json.loads(m)["t"] == "talk")
+    assert json.loads(t) == {"t": "talk", "id": "hub", "on": True}, t
+    await recv_until(hub2, lambda m: isinstance(m, bytes) and m[0] == KIND_AUDIO)
+    try:                                       # the talker never hears itself
+        m = await asyncio.wait_for(ph.recv(), 0.5)
+        assert False, ("phone A got", m[:8])
+    except asyncio.TimeoutError:
+        pass
+    await pb.close()
+
+    # Enhance (local mode, no S3): unknown map -> 409; a recorded map is queued, the background job
+    # runs enhance.py, and this points-only session ends "failed: needs a LiDAR scan" via the sidecar.
+    import urllib.request, urllib.error, urllib.parse
+    H = "http://127.0.0.1:8765"
+    def post(path):
+        path = urllib.parse.quote(path)
+        try:
+            return json.load(urllib.request.urlopen(urllib.request.Request(H + path, method="POST", data=b"{}", headers={"Content-Type": "application/json"})))
+        except urllib.error.HTTPError as e:
+            return {"status": e.code, **json.load(e)}
+    assert post("/maps/nope.radar/enhance")["status"] == 409
+    post("/maps/start")
+    for f in range(30, 45):
+        x, z, yaw = path_point(0.08 * f)
+        await ph.send(json.dumps({"t": "pose", "f": f, "ts": f / 10, "T": pose_T(x, z, yaw)}))
+        await ph.send(pack_bin(KIND_JPEG, "A", f, b"\xff\xd8fake"))
+    await recv_until(hub, lambda m: isinstance(m, bytes) and m[0] == KIND_POINTS)
+    name = post("/maps/stop")["saved"]["name"]
+    r = post(f"/maps/{name}/enhance")
+    assert r.get("queued") == name and r["enhancer"] == "local", r
+    async def wait_enhanced():
+        for _ in range(150):
+            m = next(m for m in json.load(urllib.request.urlopen(H + "/maps"))["maps"] if m["name"] == name)
+            if m.get("enhanced", {}).get("status") in ("done", "failed"):
+                return m
+            await asyncio.sleep(0.2)
+        raise AssertionError("enhance job never finished")
+    m = await wait_enhanced()
+    assert m["enhanced"]["status"] == "failed" and "LiDAR" in m["enhanced"]["error"], m
+    assert post(f"/maps/{name}/enhance").get("queued") == name           # failed -> may retry
+    await wait_enhanced()
+    urllib.request.urlopen(urllib.request.Request(H + urllib.parse.quote(f"/maps/{name}"), method="DELETE"))
+    print("relay ok: routing, state, GPU points path, voice call, enhance queue")
 
 
 fake(SESSION, seconds=5)   # poses the fake worker looks up; same path as above
@@ -52,7 +110,7 @@ procs = [subprocess.Popen([sys.executable, "fake_worker.py", SESSION, "--port", 
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)]
 try:
     time.sleep(2.5)
-    asyncio.run(asyncio.wait_for(main(), 20))
+    asyncio.run(asyncio.wait_for(main(), 60))
 finally:
     for p in procs:
         p.terminate()

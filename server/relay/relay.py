@@ -14,17 +14,18 @@ import time
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from gpu_link import GpuLink
-from wire import KIND_DEPTH, KIND_H264, KIND_JPEG, KIND_PATCH, KIND_POINTS, pack_bin, pack_points, unpack_bin
+from wire import KIND_AUDIO, KIND_DEPTH, KIND_H264, KIND_JPEG, KIND_PATCH, KIND_POINTS, pack_bin, pack_points, unpack_bin
 
 HUB_DIR = pathlib.Path(__file__).resolve().parents[2] / "hub"
 MAPS_DIR = pathlib.Path(__file__).resolve().parents[1] / "maps"
 
 hubs: set[WebSocket] = set()
+phones: dict[str, WebSocket] = {}  # id -> socket; phones receive only call audio
 state: dict[str, dict] = {}          # id -> {msg type -> latest msg}
 last_jpeg: dict[str, bytes] = {}     # id -> latest jpeg binary message
 gop: dict[str, list[bytes]] = {}     # id -> latest h264 keyframe + frames since, for late hubs
@@ -126,32 +127,125 @@ class MapFile:
                     patches += typ == 1 and first == bytes([KIND_PATCH])
                     mapped += typ == 1 and first in (bytes([KIND_POINTS]), bytes([KIND_PATCH]))
             if mapped or p.name == self.name:           # skip sessions that mapped nothing (deleted at stop anyway)
-                out.append({"name": p.name, "bytes": size, "patches": patches, "mapped": mapped, "seconds": t_ms // 1000, "where": "local"})
+                m = {"name": p.name, "bytes": size, "patches": patches, "mapped": mapped, "seconds": t_ms // 1000, "where": "local"}
+                side = p.with_name(p.name + ".json")    # written by a local enhance job
+                if side.exists():
+                    m["enhanced"] = json.loads(side.read_text()).get("enhanced")
+                out.append(m)
         return out
 
     def listing(self):
-        """Local files plus finished sessions in S3; a session in both places is listed once."""
+        """Local files plus finished sessions in S3; a session in both places is listed once, and the
+        S3 sidecar's `enhanced` state wins (the enhancer writes it there)."""
         out = {m["name"]: m for m in self.local()}
         if self.store:
             for name, meta in self.store.listing().items():
                 if name in out:
                     out[name]["where"] = "both"
+                    if meta.get("enhanced"):
+                        out[name]["enhanced"] = meta["enhanced"]
                 else:
                     out[name] = {"name": name, **meta, "where": "s3"}
         return sorted(out.values(), key=lambda m: m["name"], reverse=True)
+
+    def enhance(self, name):
+        """Queue an enhance job. With S3: a job object the EC2 enhancer picks up, and the instance is
+        started; without S3 (Mac dev): a local job in the background. -> status dict."""
+        cur = next((m for m in self.listing() if m["name"] == name), None)
+        if cur is None:
+            return {"error": "no such map"}
+        if name == self.name:
+            return {"error": "that session is still recording"}
+        if (cur.get("enhanced") or {}).get("status") in ("queued", "running"):
+            return {"error": "already enhancing"}
+        if self.store:
+            meta = self.store.get_json(f"sessions/{name}.json") or {k: cur[k] for k in ("patches", "mapped", "seconds", "bytes")}
+            meta["enhanced"] = {"status": "queued", "since": time.time()}
+            self.store.put_json(f"sessions/{name}.json", meta)
+            self.store.put_json(JOBS + name, {"name": name, "queued": time.time()})
+            started = start_enhancer()
+        else:
+            side = MAPS_DIR / f"{name}.json"
+            side.write_text(json.dumps({**cur, "enhanced": {"status": "queued", "since": time.time()}}))
+            import subprocess, sys
+            subprocess.Popen([sys.executable, str(ENHANCE_PY), name, "--local", "--out", str(MAPS_DIR)],
+                             stdout=open(MAPS_DIR / "enhance.log", "ab"), stderr=subprocess.STDOUT)
+            started = "local"
+        return {"queued": name, "enhancer": started}
+
+
+JOBS = "jobs/"
+ENHANCE_PY = pathlib.Path(__file__).resolve().parents[1] / "enhance" / "enhance.py"
+
+
+def start_enhancer():
+    """Start the EC2 enhancer (env RADAR_ENHANCE_INSTANCE = instance id; region from AWS env).
+    Already running: a no-op, its job loop sees the new job. -> what happened, for the hub.
+    A failed start (typically InsufficientInstanceCapacity) is retried in the background every
+    minute for up to an hour while jobs are queued; the job object waits in S3 meanwhile."""
+    ids = [i for i in os.environ.get("RADAR_ENHANCE_INSTANCE", "").split(",") if i]
+    if not ids:
+        return "no RADAR_ENHANCE_INSTANCE: job queued only"
+    import boto3
+    ec2 = boto3.client("ec2", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-2"))
+    err = None
+    for iid in ids:                                     # several ids = fallbacks in other zones/types
+        try:
+            r = ec2.start_instances(InstanceIds=[iid])
+            return r["StartingInstances"][0]["CurrentState"]["Name"]
+        except Exception as e:
+            err = e
+            print(f"enhancer: start {iid} failed: {str(e)[:120]}", flush=True)
+    global _retry
+    if _retry is None or _retry.done():
+        _retry = asyncio.get_event_loop().create_task(retry_start(ec2, ids))
+    return f"start failed, retrying every minute: {err!r}"[:200]
+
+
+_retry = None
+
+
+async def retry_start(ec2, ids, tries=60):
+    for i in range(tries):
+        await asyncio.sleep(60)
+        if not maps.store or not maps.store.keys(JOBS):
+            return                                      # nothing queued any more
+        for iid in ids:
+            try:
+                s = await asyncio.to_thread(lambda: ec2.start_instances(InstanceIds=[iid])["StartingInstances"][0]["CurrentState"]["Name"])
+                print(f"enhancer: {iid} started after {i + 1} retries ({s})", flush=True)
+                return
+            except Exception as e:
+                print(f"enhancer: retry {i + 1} {iid}: {str(e)[:100]}", flush=True)
 
 
 maps = MapFile()
 
 
-async def send_hubs(msg):
+async def send_hubs(msg, skip=None):
     if maps.f:                           # while recording, everything a hub sees goes in the session file
         maps.append(msg)
     for ws in list(hubs):
+        if ws is skip:
+            continue
         try:
             await (ws.send_text(msg) if isinstance(msg, str) else ws.send_bytes(msg))
         except Exception:
             hubs.discard(ws)
+
+
+async def send_phones(msg, skip=None):
+    """Call audio to every phone but the talker, in parallel: a phone on a stalled network loses this
+    chunk instead of holding up the call for everyone."""
+    async def one(rid, ws):
+        try:
+            await asyncio.wait_for(ws.send_bytes(msg), 1)
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            if phones.get(rid) is ws:
+                phones.pop(rid)
+    await asyncio.gather(*(one(rid, ws) for rid, ws in list(phones.items()) if rid != skip))
 
 
 async def on_points(rid, f, xyz, rgb, lag, queued):
@@ -169,6 +263,8 @@ def make_app(gpu_url=None, conf_min=2.0):
         global link
         link = GpuLink(gpu_url, on_points, on_status, conf_min=conf_min)   # LiDAR phones map without a GPU
         task = asyncio.create_task(link.run()) if gpu_url else None
+        if maps.store and maps.store.keys(JOBS):        # jobs left queued by an earlier relay: wake the enhancer
+            print(f"enhancer: queued jobs at start -> {start_enhancer()}", flush=True)
         yield
         if task:
             task.cancel()
@@ -181,6 +277,7 @@ def make_app(gpu_url=None, conf_min=2.0):
     @app.websocket("/phone/{rid}")
     async def phone(ws: WebSocket, rid: str):
         await ws.accept()
+        phones[rid] = ws
         try:
             while True:
                 m = await ws.receive()
@@ -214,8 +311,14 @@ def make_app(gpu_url=None, conf_min=2.0):
                         if rid in gop and len(gop[rid]) < 120:   # ponytail: caps a stuck GOP at ~4 s of video
                             gop[rid].append(b)
                         await send_hubs(b)
+                    elif kind == KIND_AUDIO:
+                        await send_hubs(b)
+                        await send_phones(b, skip=rid)
         except WebSocketDisconnect:
             pass
+        finally:
+            if phones.get(rid) is ws:
+                phones.pop(rid)
 
     @app.websocket("/hub")
     async def hub(ws: WebSocket):
@@ -229,9 +332,18 @@ def make_app(gpu_url=None, conf_min=2.0):
                 await ws.send_bytes(b)
         hubs.add(ws)
         try:
-            while True:
-                await ws.receive_text()
+            while True:                                 # a hub only sends on the voice call
+                m = await ws.receive()
+                if m["type"] == "websocket.disconnect":
+                    break
+                if m.get("bytes") is not None and m["bytes"][:1] == bytes([KIND_AUDIO]):
+                    await send_hubs(m["bytes"], skip=ws)
+                    await send_phones(m["bytes"])
+                elif m.get("text") is not None and json.loads(m["text"]).get("t") == "talk":
+                    await send_hubs(json.dumps({"t": "talk", "id": "hub", "on": bool(json.loads(m["text"]).get("on"))}), skip=ws)
         except WebSocketDisconnect:
+            pass
+        finally:
             hubs.discard(ws)
 
     @app.get("/maps")
@@ -257,11 +369,19 @@ def make_app(gpu_url=None, conf_min=2.0):
         await tell_hubs_recording()
         return {"saved": saved}
 
+    @app.post("/maps/{name}/enhance")
+    def enhance_map(name: str):
+        r = maps.enhance(pathlib.Path(name).name)
+        if "error" in r:
+            raise HTTPException(409, r["error"])
+        return r
+
     @app.get("/maps/{name}")
     def get_map(name: str):
+        """The session file, or its enhanced textures (<name>.hd)."""
         name = pathlib.Path(name).name                  # no path tricks
         p = MAPS_DIR / name
-        if p.suffix != ".radar":
+        if p.suffix not in (".radar", ".hd"):
             return {"error": "no such map"}
         if p.exists():
             return FileResponse(p, media_type="application/octet-stream")
@@ -274,7 +394,8 @@ def make_app(gpu_url=None, conf_min=2.0):
         name = pathlib.Path(name).name
         if name == maps.name:
             return {"error": "that session is still recording"}
-        (MAPS_DIR / name).unlink(missing_ok=True)
+        for p in MAPS_DIR.glob(name + "*"):             # session, local sidecar, enhanced files
+            p.unlink(missing_ok=True)
         if maps.store:
             maps.store.delete(name)
         return {"deleted": name}

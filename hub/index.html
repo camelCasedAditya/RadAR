@@ -20,6 +20,10 @@
   .feed.has-video canvas { display:block; }
   .feed.has-video img { display:none; }
   .feed .meta { color:var(--dim); margin-left:auto; }
+  .feed .vid { position:relative; }
+  .feed .hr { position:absolute; top:8px; left:8px; padding:2px 8px; border-radius:4px; background:rgba(0,0,0,.65); color:#ff5a6e; font-weight:bold; }
+  .feed .hr.stale { color:var(--dim); }
+  .feed .mic { animation: blink 1.2s step-start infinite; }
   #status { grid-column:1; display:flex; gap:18px; padding:6px 12px; border-top:1px solid var(--line); background:var(--panel); white-space:nowrap; overflow-x:auto; }
   #status .warn { color:var(--warn); }
   #conn { position:absolute; top:10px; left:12px; color:var(--dim); }
@@ -65,7 +69,7 @@
   <div id="view">
     <div id="conn">connecting…</div>
     <div id="rec" hidden></div>
-    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="record">● Record new map</button><button id="maps" aria-pressed="false">Past maps</button><button id="surface" aria-pressed="true">Surface: photos</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
+    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="record">● Record new map</button><button id="maps" aria-pressed="false">Past maps</button><button id="surface" aria-pressed="true">Surface: photos</button><span id="viewmode" hidden title="this map has an enhanced version: the same surfaces with sharper photos from the video"><button data-view="original" aria-pressed="true">Original</button><button data-view="enhanced" aria-pressed="false">Enhanced</button></span><button id="talk" aria-pressed="false" title="open your mic to everyone on the call; click again to stop">🎙 Talk</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
     <div id="mapsbox" hidden>
       <div class="row"><b>Past maps</b><span class="meta" id="maps-where"></span></div>
       <ul id="maps-list"></ul>
