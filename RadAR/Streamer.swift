@@ -229,7 +229,7 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         videoTimes.removeAll { frame.timestamp - $0 > 2 }
         mapTimes.removeAll { frame.timestamp - $0 > 2 }
         let airpods = (bpm.map { " · ♥ \($0)" } ?? "") + (head.connected ? " · head ✓" : "")
-        onStatus?("\(link) · video \(videoTimes.count / 2) fps · map \(mapTimes.count / 2) fps · tracking \(tracking)\(airpods)"
+        onStatus?("\(link) · video \(videoTimes.count / 2) fps · map \(mapTimes.count / 2) fps · tracking \(tracking)\(airpods)\n\(uwb.status)"
                   + (lastError.isEmpty ? "" : "\nlast drop: \(lastError)"))
     }
 

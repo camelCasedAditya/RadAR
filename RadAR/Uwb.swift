@@ -20,6 +20,20 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
     private var configs: [String: NINearbyPeerConfiguration] = [:]
     private var lastToken: [String: String] = [:]       // last token received from each peer
     private var lastReport: [String: TimeInterval] = [:]
+    private var state: [String: String] = [:]           // per peer, for the phone's status line
+    private var noAssist = false                        // camera assistance failed once: measure without it
+    private var lastReopen: [String: TimeInterval] = [:]
+
+    /// e.g. "uwb B 3.2 m ↗ · C waiting for token" (shown on the phone so a stalled pairing is visible)
+    var status: String {
+        guard Self.supported else { return "uwb: not supported on this phone" }
+        guard !phones.isEmpty else { return "uwb: no other phones" }
+        let now = ProcessInfo.processInfo.systemUptime
+        return "uwb " + phones.sorted().map { id in
+            if let l = latest[id], now - l.at < 3 { return "\(id) \(String(format: "%.1f", l.distance)) m\(l.angle == nil ? " (no direction)" : "")" }
+            return "\(id) \(state[id] ?? "starting")"
+        }.joined(separator: " · ")
+    }
 
     static var supported: Bool { NISession.deviceCapabilities.supportsPreciseDistanceMeasurement }
     private static var cameraAssist: Bool { NISession.deviceCapabilities.supportsCameraAssistance }
@@ -47,7 +61,8 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         let s = sessions[id] ?? open(id, announce: false)
         sendMyToken(s, to: id)
         let cfg = NINearbyPeerConfiguration(peerToken: token)
-        if Self.cameraAssist { cfg.isCameraAssistanceEnabled = true }
+        if Self.cameraAssist && !noAssist { cfg.isCameraAssistanceEnabled = true }
+        state[id] = "searching"
         configs[id] = cfg
         s.run(cfg)
     }
@@ -62,8 +77,9 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         let s = NISession()
         s.delegate = self
         s.delegateQueue = queue
-        if Self.cameraAssist { s.setARSession(ar) }     // shares the streaming ARSession
+        if Self.cameraAssist && !noAssist { s.setARSession(ar) }   // shares the streaming ARSession
         sessions[id] = s
+        state[id] = "waiting for their token"
         if announce { sendMyToken(s, to: id) }
         return s
     }
@@ -73,11 +89,14 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         configs[id] = nil
         lastToken[id] = nil
         latest[id] = nil
+        state[id] = nil
     }
 
     private func sendMyToken(_ s: NISession, to id: String) {
         guard let t = s.discoveryToken,
-              let data = try? NSKeyedArchiver.archivedData(withRootObject: t, requiringSecureCoding: true) else { return }
+              let data = try? NSKeyedArchiver.archivedData(withRootObject: t, requiringSecureCoding: true) else {
+            state[id] = "no token (session not ready)"; return
+        }
         sendToken?(id, data.base64EncodedString())
     }
 
@@ -107,6 +126,7 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
     func session(_ session: NISession, didRemove nearbyObjects: [NINearbyObject], reason: NINearbyObject.RemovalReason) {
         guard let id = peer(of: session) else { return }
         latest[id] = nil
+        state[id] = reason == .timeout ? "out of range" : "they stopped"
         if reason == .timeout, let cfg = configs[id] { session.run(cfg) }   // out of range for a while: keep trying
     }
 
@@ -116,8 +136,14 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
 
     func session(_ session: NISession, didInvalidateWith error: Error) {
         guard let id = peer(of: session) else { return }
-        print("[radar] uwb \(id): \(error.localizedDescription)")
+        print("[radar] uwb \(id): \(error)")
+        let code = (error as? NIError)?.code
+        if Self.cameraAssist && !noAssist && code != .userDidNotAllow { noAssist = true }   // retry without the camera
         close(id)
-        if phones.contains(id) { open(id) }             // re-pair with a fresh session and token
+        state[id] = "error: \(error.localizedDescription)"
+        let now = ProcessInfo.processInfo.systemUptime
+        guard phones.contains(id), code != .userDidNotAllow, now - (lastReopen[id] ?? 0) > 5 else { return }
+        lastReopen[id] = now                            // re-pair with a fresh session and token, at most every 5 s
+        open(id)
     }
 }
