@@ -20,6 +20,7 @@ async def recv_until(ws, pred, timeout=10):
 async def main():
     hub = await websockets.connect(U + "/hub", max_size=None)
     assert json.loads(await hub.recv())["t"] == "state"
+    assert json.loads(await hub.recv()) == {"t": "recording", "id": "", "name": None, "since": None}   # not recording yet
     ph = await websockets.connect(U + "/phone/A")
     await ph.send(json.dumps({"t": "hello", "name": "A"}))
     assert json.loads(await hub.recv())["t"] == "hello"
@@ -40,6 +41,7 @@ async def main():
     hub2 = await websockets.connect(U + "/hub")
     s = json.loads(await hub2.recv())
     assert "pose" in s["responders"]["A"] and "head" in s["responders"]["A"], s
+    assert json.loads(await hub2.recv())["t"] == "recording"
     assert unpack_bin(await hub2.recv())[0] == KIND_JPEG
     print("relay ok: routing, state, and GPU points path")
 

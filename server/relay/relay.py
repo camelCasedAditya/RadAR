@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import struct
 import time
 from contextlib import asynccontextmanager
@@ -53,15 +54,22 @@ class MapFile:
             except Exception as e:                       # no creds / no boto3: local files only
                 print(f"s3: disabled ({e!r})", flush=True)
                 self.store = None
-        self.new()
+        self.name = None                                 # recording only between start() and stop()
         if self.store:                                   # crashed sessions: upload whole files now
             for m in self.local():
-                if m["name"] != self.name and m["name"] not in up:
+                if m["name"] not in up:
                     self.store.sync_file(MAPS_DIR / m["name"], {k: m[k] for k in ("patches", "mapped", "seconds", "bytes")})
 
-    def new(self):
-        self.close()
-        self.name = time.strftime("%Y%m%d-%H%M%S") + ".radar"
+    def status(self):
+        return {"t": "recording", "id": "", "name": self.name and self.name[:-6], "since": self.name and self.t0}
+
+    def start(self, label):
+        """Begin a named session. The name becomes the file name, so it is reduced to safe characters."""
+        self.stop()
+        label = re.sub(r"[^A-Za-z0-9 _.-]+", "", label).strip()[:60] or time.strftime("%Y-%m-%d %H%M")
+        if (MAPS_DIR / f"{label}.radar").exists():
+            label += time.strftime(" %H%M%S")
+        self.name = f"{label}.radar"
         self.f = open(MAPS_DIR / self.name, "ab")
         self.t0, self.patches, self.mapped, self.t_ms, self.bytes = time.time(), 0, 0, 0, 0
         if self.store:
@@ -71,13 +79,20 @@ class MapFile:
         for frames in gop.values():
             for b in frames:
                 self.append(b)
+        return self.status()
 
-    def close(self):
+    def stop(self):
+        """End the session; the S3 upload completes in the background. -> what was saved, or None."""
         if not self.f:
-            return
+            return None
         self.f.close()
+        meta = {"name": self.name, "patches": self.patches, "mapped": self.mapped, "seconds": self.t_ms // 1000, "bytes": self.bytes}
         if self.store:
-            self.store.finish({"patches": self.patches, "mapped": self.mapped, "seconds": self.t_ms // 1000, "bytes": self.bytes})
+            self.store.finish(meta)
+        if not self.mapped:                              # nothing mapped: not worth keeping
+            (MAPS_DIR / self.name).unlink(missing_ok=True)
+        self.f = self.name = None
+        return meta
 
     def write(self, b):
         self.f.write(b)
@@ -110,7 +125,7 @@ class MapFile:
                     pos += 4 + ln
                     patches += typ == 1 and first == bytes([KIND_PATCH])
                     mapped += typ == 1 and first in (bytes([KIND_POINTS]), bytes([KIND_PATCH]))
-            if mapped or p.name == self.name:           # skip sessions that mapped nothing
+            if mapped or p.name == self.name:           # skip sessions that mapped nothing (deleted at stop anyway)
                 out.append({"name": p.name, "bytes": size, "patches": patches, "mapped": mapped, "seconds": t_ms // 1000, "where": "local"})
         return out
 
@@ -130,7 +145,8 @@ maps = MapFile()
 
 
 async def send_hubs(msg):
-    maps.append(msg)                     # everything a hub sees is in the session file
+    if maps.f:                           # while recording, everything a hub sees goes in the session file
+        maps.append(msg)
     for ws in list(hubs):
         try:
             await (ws.send_text(msg) if isinstance(msg, str) else ws.send_bytes(msg))
@@ -156,7 +172,7 @@ def make_app(gpu_url=None, conf_min=2.0):
         yield
         if task:
             task.cancel()
-        maps.close()                                    # finish the S3 upload of the current session
+        maps.stop()                                     # finish the S3 upload of the current session
         if maps.store:
             maps.store.close()
 
@@ -205,6 +221,7 @@ def make_app(gpu_url=None, conf_min=2.0):
     async def hub(ws: WebSocket):
         await ws.accept()
         await ws.send_text(json.dumps({"t": "state", "responders": state}))
+        await ws.send_text(json.dumps(maps.status()))
         for b in last_jpeg.values():
             await ws.send_bytes(b)
         for frames in gop.values():
@@ -219,17 +236,26 @@ def make_app(gpu_url=None, conf_min=2.0):
 
     @app.get("/maps")
     def list_maps():
-        return {"current": maps.name, "bucket": maps.store.bucket if maps.store else None, "maps": maps.listing()}
+        return {**maps.status(), "bucket": maps.store.bucket if maps.store else None, "maps": maps.listing()}
 
-    @app.post("/maps/new")
-    async def new_map():
-        maps.new()
-        if link:
+    async def tell_hubs_recording():
+        for ws in list(hubs):                           # not via send_hubs: must not land in the file
+            await ws.send_text(json.dumps(maps.status()))
+
+    @app.post("/maps/start")
+    async def start_map(body: dict):
+        maps.start(str(body.get("name", "")))
+        if link:                                        # fresh map: forget what was mapped before
             link.seen.clear()
             link.keyposes.clear()
-        for ws in list(hubs):
-            await ws.send_text(json.dumps({"t": "map_new", "id": "", "name": maps.name}))
-        return {"current": maps.name}
+        await tell_hubs_recording()
+        return maps.status()
+
+    @app.post("/maps/stop")
+    async def stop_map():
+        saved = maps.stop()
+        await tell_hubs_recording()
+        return {"saved": saved}
 
     @app.get("/maps/{name}")
     def get_map(name: str):

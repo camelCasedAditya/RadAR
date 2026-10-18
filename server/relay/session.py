@@ -18,7 +18,7 @@ import websockets
 
 from wire import KIND_JPEG, pack_bin, unpack_bin
 
-RELAY_MSGS = {"uwb_check", "gpu", "maplag", "state"}   # relay-originated; not phone traffic
+RELAY_MSGS = {"uwb_check", "gpu", "maplag", "state", "recording"}   # relay-originated; not phone traffic
 
 
 async def record(path, url):

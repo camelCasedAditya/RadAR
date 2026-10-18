@@ -238,7 +238,7 @@ const handlers = {
   pose: onPose,
   gpu: (d) => { gpu = { ...d, at: performance.now() }; },
   maplag: (d) => { responder(d.id).mapLag = d; },
-  map_new: () => { clearMap(); loadMaps(); },
+  recording: onRecording,
   state: (d) => { for (const [id, msgs] of Object.entries(d.responders)) for (const m of Object.values(msgs)) handlers[m.t]?.({ ...m, id }); },
 };   // add-on modules register more types here
 
@@ -274,18 +274,45 @@ connect();
 
 // ---------- saved maps (relay: GET /maps, GET /maps/<name>, POST /maps/new) ----------
 const mapsBox = document.getElementById("mapsbox"), mapsBtn = document.getElementById("maps");
-// A session file holds everything the live hub saw. "Load" applies just the geometry (points,
-// patches) at once; "Replay" plays it all back on its original timeline: video, markers, map growth.
+// ---------- recording ----------
+// The relay records a session only between "Record new map" and "Stop recording"; the file is named
+// by the user and goes to S3 when stopped. The relay tells every hub the recording state.
+const recEl = document.getElementById("rec"), recordBtn = document.getElementById("record");
+let recording = { name: null, since: null };
+function onRecording(d) {
+  if (d.name && d.name !== recording.name) clearMap();        // a new map starts from an empty view
+  recording = d;
+  recordBtn.textContent = d.name ? "■ Stop recording" : "● Record new map";
+  recordBtn.classList.toggle("on", !!d.name);
+  recEl.className = ""; recEl.hidden = !d.name;
+}
+recordBtn.onclick = async () => {
+  if (recording.name) {
+    const { saved } = await (await fetch("/maps/stop", { method: "POST" })).json();
+    recEl.hidden = false; recEl.className = "saved";
+    recEl.textContent = saved?.mapped ? `saved "${saved.name.replace(/\.radar$/, "")}" (${saved.patches} patches) · uploading to S3` : "nothing was mapped, not saved";
+    setTimeout(() => { if (!recording.name) recEl.hidden = true; }, 6000);
+    setTimeout(loadMaps, 4000);
+    return;
+  }
+  const name = prompt("Name this map", new Date().toISOString().slice(0, 16).replace("T", " "));
+  if (name === null) return;
+  await fetch("/maps/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+};
+
+// ---------- past maps ----------
+// Click a name to load just its map (points, patches) at once. ▶ replays the whole session on its
+// original timeline: video, markers, map growth. ↓ downloads the file, ✕ deletes it everywhere.
 let replaying = null;                   // name of the file being replayed, or null
 async function loadMaps() {
   const d = await (await fetch("/maps")).json();
-  document.getElementById("maps-current").textContent = `recording: ${d.current}${d.bucket ? ` → s3://${d.bucket}` : ""}`;
+  document.getElementById("maps-where").textContent = d.bucket ? `s3://${d.bucket}` : "relay disk only";
   document.getElementById("maps-list").innerHTML = d.maps.map(m =>
-    `<li><span>${m.name}<br><span class="meta">${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, "0")} · ${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB · ${m.where === "s3" ? "☁ S3" : m.where === "both" ? "☁ + local" : "local"}</span></span>
-     <span><button data-name="${m.name}" data-mode="map">Load</button>
-     <button data-name="${m.name}" data-mode="replay">${replaying === m.name ? "Stop" : "Replay"}</button>
+    `<li><button class="name" data-name="${m.name}" data-mode="map" title="load this map">${m.name.replace(/\.radar$/, "")}
+       <span class="meta">${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, "0")} · ${m.patches} patches · ${(m.bytes / 1e6).toFixed(1)} MB · ${m.where === "s3" ? "☁ S3" : m.where === "both" ? "☁ + local" : "local"}</span></button>
+     <span><button data-name="${m.name}" data-mode="replay" title="replay with video">${replaying === m.name ? "■" : "▶"}</button>
      <a href="/maps/${m.name}" download title="download file">↓</a>
-     <button data-name="${m.name}" data-mode="delete" title="delete everywhere">✕</button></span></li>`).join("");
+     <button data-name="${m.name}" data-mode="delete" title="delete everywhere">✕</button></span></li>`).join("") || "<li class='meta'>no saved maps yet</li>";
   for (const b of document.querySelectorAll("#maps-list button")) b.onclick = () => playMap(b.dataset.name, b.dataset.mode, b);
 }
 function* records(buf) {                // RADAR2: u32 len | u32 t_ms | u8 type | body
@@ -303,16 +330,18 @@ async function playMap(name, mode, btn) {
     return loadMaps();
   }
   if (mode === "replay" && replaying === name) { replaying = null; return; }      // Stop
-  btn.textContent = "loading…"; btn.disabled = true;
+  const label = btn.textContent;
+  btn.disabled = true;
   const buf = new Uint8Array(await (await fetch(`/maps/${name}`)).arrayBuffer());
   btn.disabled = false;
-  if (new TextDecoder().decode(buf.subarray(0, 7)) !== "RADAR2\n") { btn.textContent = "old file"; return; }
+  if (new TextDecoder().decode(buf.subarray(0, 7)) !== "RADAR2\n") { alert("old file format"); return; }
   if (mode === "map") {
     for (const r of records(buf)) if (!r.text && (r.body[0] === 2 || r.body[0] === 5)) await onBinary(r.body);
-    btn.textContent = "loaded";
+    recEl.hidden = false; recEl.className = "saved"; recEl.textContent = `loaded "${name.replace(/\.radar$/, "")}"`;
+    setTimeout(() => { if (!recording.name) recEl.hidden = true; }, 4000);
     return;
   }
-  replaying = name; btn.textContent = "Stop";
+  replaying = name; btn.textContent = "■";
   const t0 = performance.now();
   for (const r of records(buf)) {
     if (replaying !== name) break;
@@ -322,14 +351,13 @@ async function playMap(name, mode, btn) {
     else await onBinary(r.body);
   }
   if (replaying === name) replaying = null;
-  btn.textContent = "Replay";
+  btn.textContent = "▶";
 }
 mapsBtn.onclick = () => {
   mapsBox.hidden = !mapsBox.hidden;
   mapsBtn.setAttribute("aria-pressed", !mapsBox.hidden);
   if (!mapsBox.hidden) loadMaps();
 };
-document.getElementById("maps-new").onclick = async () => { await fetch("/maps/new", { method: "POST" }); };
 
 // ---------- tint + follow + status ----------
 // Tint: colour each responder's points with their marker colour instead of camera colour,
@@ -389,6 +417,10 @@ setInterval(() => {
     r.meta.textContent = `video ${vfps.toFixed(0)} fps · ${lag}`;
     return `<span class="${stale ? "warn" : ""}">${r.id}: ${stale ? `lost ${age.toFixed(0)}s` : `pose ${fps.toFixed(0)} fps`}, video ${vfps.toFixed(0)} fps, ${lag}, ${r.patchN ? `${r.patchN} patches` : `${(r.ptsN / 1000).toFixed(0)}k pts`}</span>`;
   }).join("") || "<span>waiting for responders…</span>";
+  if (recording.name && !recEl.classList.contains("saved")) {
+    const el = Math.max(0, Math.floor(Date.now() / 1000 - recording.since));
+    recEl.innerHTML = `<b>●</b> recording "${recording.name}" ${Math.floor(el / 60)}:${String(el % 60).padStart(2, "0")}`;
+  }
   const g = gpu && now - gpu.at < 6000;
   status.innerHTML += g ? `<span>GPU ${gpu.fps} fps · ${gpu.mem_gb} GB</span>` : `<span class="warn">GPU offline</span>`;
 }, 500);

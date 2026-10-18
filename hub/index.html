@@ -23,6 +23,12 @@
   #status { grid-column:1; display:flex; gap:18px; padding:6px 12px; border-top:1px solid var(--line); background:var(--panel); white-space:nowrap; overflow-x:auto; }
   #status .warn { color:var(--warn); }
   #conn { position:absolute; top:10px; left:12px; color:var(--dim); }
+  #rec { position:absolute; top:10px; left:60px; color:var(--warn); }
+  #rec.saved { color:var(--text); }
+  #rec[hidden] { display:none; }
+  #record.on { border-color:var(--warn); color:var(--warn); }
+  @keyframes blink { 50% { opacity:0.25; } }
+  #rec b { animation: blink 1.2s step-start infinite; }
   #controls { position:absolute; top:8px; right:10px; display:flex; gap:6px; }
   button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:4px 8px; font:inherit; cursor:pointer; }
   button[aria-pressed="true"] { border-color:var(--text); }
@@ -37,6 +43,9 @@
   #mapsbox .row { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
   #mapsbox ul { list-style:none; margin:0; padding:0; }
   #mapsbox li { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:4px 0; border-top:1px solid var(--line); }
+  #mapsbox li .name { border:0; padding:4px 0; text-align:left; flex:1; font-weight:bold; }
+  #mapsbox li .name:hover { text-decoration:underline; }
+  #mapsbox li .meta { display:block; font-weight:normal; }
   #mapsbox .meta { color:var(--dim); }
   #mapsbox a { color:var(--text); text-decoration:none; padding:4px 6px; border:1px solid var(--line); border-radius:4px; }
   @media (max-width:760px) {
@@ -55,9 +64,10 @@
 <div id="app">
   <div id="view">
     <div id="conn">connecting…</div>
-    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="maps" aria-pressed="false">Maps</button><button id="surface" aria-pressed="true">Surface: photos</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
+    <div id="rec" hidden></div>
+    <div id="controls"><button id="connect" aria-pressed="false">Connect</button><button id="record">● Record new map</button><button id="maps" aria-pressed="false">Past maps</button><button id="surface" aria-pressed="true">Surface: photos</button><button id="tint" aria-pressed="false">Tint: off</button><button id="follow" aria-pressed="false">Follow: off</button></div>
     <div id="mapsbox" hidden>
-      <div class="row"><b id="maps-current"></b><button id="maps-new">New map</button></div>
+      <div class="row"><b>Past maps</b><span class="meta" id="maps-where"></span></div>
       <ul id="maps-list"></ul>
     </div>
     <div id="qr" hidden>
