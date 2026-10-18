@@ -32,6 +32,15 @@ function resize() {
 }
 new ResizeObserver(resize).observe(view);
 
+// soft round sprite for points: squares read as "blocky", discs read as a surface
+const dotTexture = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 32;
+  const g = c.getContext("2d"), grd = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  grd.addColorStop(0, "rgba(255,255,255,1)"); grd.addColorStop(0.8, "rgba(255,255,255,1)"); grd.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grd; g.fillRect(0, 0, 32, 32);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; return t;
+})();
+
 // ---------- responders ----------
 const responders = new Map();   // id -> R
 const side = document.getElementById("side");
@@ -61,7 +70,10 @@ function responder(id) {
   ptsGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_POINTS * 3), 3));
   ptsGeo.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(MAX_POINTS * 3), 3, true));
   ptsGeo.setDrawRange(0, 0);
-  const cloud = new THREE.Points(ptsGeo, new THREE.PointsMaterial({ size: 0.04, vertexColors: !tintOn, color: tintOn ? color : 0xffffff }));
+  const cloud = new THREE.Points(ptsGeo, new THREE.PointsMaterial({
+    size: 0.022, vertexColors: !tintOn, color: tintOn ? color : 0xffffff,
+    map: dotTexture, alphaTest: 0.5, transparent: false,   // round dots instead of squares
+  }));
   cloud.frustumCulled = false;
   scene.add(cloud);
 

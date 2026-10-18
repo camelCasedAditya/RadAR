@@ -18,6 +18,8 @@ import websockets
 
 from wire import KIND_JPEG, pack_bin, unpack_bin
 
+RELAY_MSGS = {"uwb_check", "gpu", "maplag", "state"}   # relay-originated; not phone traffic
+
 
 async def record(path, url):
     t0 = time.time()
@@ -27,7 +29,7 @@ async def record(path, url):
         async for m in ws:
             if isinstance(m, str):
                 d = json.loads(m)
-                if d["t"] == "uwb_check":
+                if d["t"] in RELAY_MSGS or not d.get("id"):
                     continue
                 f.write(json.dumps({"dt": time.time() - t0, "id": d["id"], "text": m}) + "\n")
             else:
@@ -37,7 +39,8 @@ async def record(path, url):
 
 
 async def replay(path, url, loop):
-    rows = [json.loads(l) for l in open(path)]
+    rows = [r for r in (json.loads(l) for l in open(path)) if r.get("id")
+            and not ("text" in r and json.loads(r["text"])["t"] in RELAY_MSGS)]   # phone traffic only
     ids = sorted({r["id"] for r in rows})
     socks = {i: await websockets.connect(f"{url}/phone/{i}", max_size=None) for i in ids}
     while True:

@@ -42,7 +42,7 @@ async def on_status(d):
     await send_hubs(json.dumps({"t": "gpu", "id": "", **d}))
 
 
-def make_app(gpu_url=None, conf_min=1.5):
+def make_app(gpu_url=None, conf_min=2.0):
     @asynccontextmanager
     async def lifespan(_app):
         global link
@@ -122,7 +122,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--gpu", help="lingbot worker websocket, e.g. ws://localhost:8010/stream")
     # ponytail: one global confidence cut. Real indoor walks score far lower than the courthouse sample
-    # (median ~1-2, p90 ~2.3), so 3 keeps nothing; 1.5 keeps ~half. Tune by watching for floaters vs holes.
-    ap.add_argument("--conf", type=float, default=1.5, help="drop depth pixels below this lingbot confidence")
+    # (median ~1-2, p90 ~2.3), so 3 keeps nothing; 2 keeps the solid third now that depth comes at stride 3. Tune by watching for floaters vs holes.
+    ap.add_argument("--conf", type=float, default=2.0, help="drop depth pixels below this lingbot confidence")
     a = ap.parse_args()
     uvicorn.run(make_app(a.gpu, a.conf), host="0.0.0.0", port=a.port, ws_max_size=8 * 1024 * 1024)

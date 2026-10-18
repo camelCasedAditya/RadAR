@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # (Re)start the lingbot worker on a RunPod pod after setup_runpod.sh. Logs to /workspace/worker.log.
+# Extra args go to worker.py; use --depth_stride 3 (default 4 is blocky, 2 is too many bytes for the tunnel).
 pkill -f "[p]ython /workspace/rad-ar/worker.py" 2>/dev/null; sleep 1
 export PATH=/usr/local/cuda/bin:$PATH       # FlashInfer compiles its kernels with nvcc on first use
 cd /workspace

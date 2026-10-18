@@ -30,8 +30,8 @@ SCALE_WAIT = 1.0             # s with NO answers at all before we assume it is c
 LOST_AFTER = 5.0             # s before an unanswered frame is written off
 # ponytail: fixed quality knobs; tune on site (watch the hub for floaters vs holes).
 SCALE_SMOOTH = 0.05          # EMA weight of each new lingbot->metres scale estimate within a segment
-MAX_DEPTH = 5.0              # m; lingbot depth is least reliable far away
-VOXEL = 0.04                 # m; one point kept per cube, shared by all phones
+MAX_DEPTH = 4.0              # m; lingbot depth is least reliable far away
+VOXEL = 0.02                 # m; one point kept per cube, shared by all phones (~pixel spacing at 3 m with depth stride 3)
 MIN_BRIGHTNESS = 12          # mean grey level below which a map frame is treated as a dead camera
 
 
@@ -86,7 +86,7 @@ def voxel_keys(pts, size=VOXEL):
 
 
 class GpuLink:
-    def __init__(self, url, on_points, on_status, conf_min=1.5, max_points=20_000, queue_cap=15):
+    def __init__(self, url, on_points, on_status, conf_min=2.0, max_points=40_000, queue_cap=15):
         self.url, self.on_points, self.on_status = url, on_points, on_status
         self.conf_min, self.max_points = conf_min, max_points
         self.ws = None
