@@ -24,6 +24,7 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
     private var noAssist = false                        // camera assistance failed once: measure without it
     private var lastReopen: [String: TimeInterval] = [:]
     private var tokenTries: [String: Int] = [:]
+    private var converge: [String: String] = [:]        // why camera-assisted direction is not ready yet
 
     /// e.g. "uwb B 3.2 m ↗ · C waiting for token" (shown on the phone so a stalled pairing is visible)
     var status: String {
@@ -31,7 +32,11 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         guard !phones.isEmpty else { return "uwb: no other phones" }
         let now = ProcessInfo.processInfo.systemUptime
         return "uwb " + phones.sorted().map { id in
-            if let l = latest[id], now - l.at < 3 { return "\(id) \(String(format: "%.1f", l.distance)) m\(l.angle == nil ? " (no direction)" : "")" }
+            if let l = latest[id], now - l.at < 3 {
+                let why = !Self.cameraAssist ? "no direction: peer outside the UWB view"
+                    : noAssist ? "no direction: camera assist off" : "no direction: \(converge[id] ?? "converging")"
+                return "\(id) \(String(format: "%.1f", l.distance)) m\(l.angle == nil ? " (\(why))" : "")"
+            }
             return "\(id) \(state[id] ?? "starting")"
         }.joined(separator: " · ")
     }
@@ -140,6 +145,8 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
             angle = Double(atan2(simd_dot(rel, right), simd_dot(rel, f)))
         } else if let dir = o.direction {
             angle = Double(atan2(dir.x, -dir.z))       // device axes: x right, -z out of the back camera
+        } else if let h = o.horizontalAngle {
+            angle = Double(h)                          // camera assist, before a full position: azimuth, + = right
         }
         let now = ProcessInfo.processInfo.systemUptime
         latest[id] = (Double(d), angle, now)
@@ -154,6 +161,25 @@ nonisolated final class UwbTracker: NSObject, NISessionDelegate, @unchecked Send
         latest[id] = nil
         state[id] = reason == .timeout ? "out of range" : "they stopped"
         if reason == .timeout, let cfg = configs[id] { session.run(cfg) }   // out of range for a while: keep trying
+    }
+
+    func session(_ session: NISession, didUpdateAlgorithmConvergence convergence: NIAlgorithmConvergence, for object: NINearbyObject?) {
+        guard let id = peer(of: session) else { return }
+        switch convergence.status {
+        case .converged: converge[id] = nil
+        case .notConverged(let reasons):
+            converge[id] = reasons.map { r -> String in
+                switch r {
+                case .insufficientMovement: return "walk around a little"
+                case .insufficientHorizontalSweep: return "sweep the phone side to side"
+                case .insufficientVerticalSweep: return "tilt the phone up and down"
+                case .insufficientLighting: return "too dark for the camera"
+                default: return r.localizedDescription ?? "converging"
+                }
+            }.joined(separator: ", ")
+        case .unknown: converge[id] = "converging"
+        @unknown default: converge[id] = "converging"
+        }
     }
 
     func sessionSuspensionEnded(_ session: NISession) {
