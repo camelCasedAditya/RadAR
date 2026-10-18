@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var status = "idle"
     @State private var streamer = Streamer()
     @State private var scanning = false
+    @State private var talking = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -28,6 +29,16 @@ struct ContentView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 } else {
                     Text(status).font(.footnote.monospaced())
+                    // party-line call: everyone else and the hub hear this phone while it is held
+                    Text(talking ? "Talking…" : "Hold to talk")
+                        .font(.title2.bold())
+                        .frame(maxWidth: .infinity, minHeight: 90)
+                        .background(talking ? Color.red : Color.accentColor.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
+                        .foregroundStyle(.white)
+                        .gesture(DragGesture(minimumDistance: 0)
+                            .onChanged { _ in if !talking { talking = true; streamer.setTalking(true) } }
+                            .onEnded { _ in talking = false; streamer.setTalking(false) })
+                        .accessibilityAddTraits(.isButton)
                 }
                 Button(running ? "Stop" : "Start", action: toggle)
                     .buttonStyle(.borderedProminent)
@@ -53,6 +64,7 @@ struct ContentView: View {
 
     private func toggle() {
         if running {
+            if talking { talking = false; streamer.setTalking(false) }
             streamer.stop()
             running = false
             status = "idle"

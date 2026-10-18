@@ -25,6 +25,13 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     private var tracking = "starting"
     private var link = "connecting"
     private var lastError = ""
+    // AirPods extras (Airpods.swift), all optional
+    let voice = VoiceCall()
+    private lazy var heart = HeartRate(queue: queue)
+    private lazy var head = HeadTracker(queue: queue)
+    private var phoneYaw = 0.0                   // camera heading in the ARKit world frame, as the hub computes it
+    private var bpm: Int?
+    private var audioSeq: UInt32 = 0
 
     static let width = 518  // lingbot-map native width; height is rounded to a multiple of 14
     // lingbot-map is a streaming VIDEO model: each frame leans on the frames just before it, so it
@@ -45,6 +52,19 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
                 self?.queue.async { self?.sendVideo(f, key: key, data: data) }
             }
             connect()
+            heart.onBPM = { [weak self] b in self?.bpm = Int(b.rounded()); self?.emit(.string(Wire.json(["t": "hr", "bpm": b]))) }
+            head.phoneYaw = { [weak self] in self?.phoneYaw ?? 0 }
+            head.onHead = { [weak self] yaw, pitch in self?.emit(.string(Wire.json(["t": "head", "yaw": yaw, "pitch": pitch]))) }
+            voice.onChunk = { [weak self] pcm in
+                self?.queue.async {
+                    guard let self else { return }
+                    self.audioSeq &+= 1
+                    self.emit(.data(Wire.audioFrame(id: self.rid, seq: self.audioSeq, pcm: pcm)))
+                }
+            }
+            heart.start()
+            head.start()
+            voice.start()
         }
         let cfg = ARWorldTrackingConfiguration()
         cfg.worldAlignment = .gravity
@@ -60,7 +80,11 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
 
     func stop() {
         session.pause()
+        heart.stop()
+        head.stop()
+        voice.stop()
         queue.async { [self] in
+            bpm = nil
             base = nil
             encoder.stop()
             ws?.cancel(with: .goingAway, reason: nil)
@@ -85,14 +109,39 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         listen(task)
     }
 
-    /// The relay never sends to phones; a receive only completes when the socket dies.
+    /// The relay sends phones only call audio (kind 7) from the other phones and the hub.
     private func listen(_ task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
             guard let self else { return }
             self.queue.async {
                 guard self.ws === task else { return }
-                if case .failure(let e) = result { self.reconnect(because: "receive: \(e.localizedDescription)") } else { self.listen(task) }
+                switch result {
+                case .failure(let e):
+                    self.reconnect(because: "receive: \(e.localizedDescription)")
+                case .success(let m):
+                    if case .data(let d) = m, d.count > 6, d[d.startIndex] == 7 {
+                        let b = [UInt8](d), idlen = Int(b[1])
+                        if b.count > 6 + idlen {
+                            self.voice.play(String(decoding: b[2..<2 + idlen], as: UTF8.self), Data(b[(6 + idlen)...]))
+                        }
+                    }
+                    self.listen(task)
+                }
             }
+        }
+    }
+
+    /// Push-to-talk (ContentView's Hold to talk button).
+    func setTalking(_ on: Bool) {
+        voice.setTalking(on)
+        emit(.string(Wire.json(["t": "talk", "on": on])))
+    }
+
+    /// Send from any thread, if connected.
+    private func emit(_ m: URLSessionWebSocketTask.Message) {
+        queue.async { [weak self] in
+            guard let self, let ws = self.ws else { return }
+            self.send(m, on: ws)
         }
     }
 
@@ -123,6 +172,7 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
         frameId &+= 1
         let f = frameId
         let T = frame.camera.transform
+        phoneYaw = Double(atan2(T.columns.2.x, T.columns.2.z))   // camera -Z axis -> atan2(-fwd.x, -fwd.z)
         let mapFrame = isMapFrame(T, at: frame.timestamp) && pending < 30
         // ARKit's tracked feature points carry metric depth; the relay reads lingbot's depth at the same
         // pixels to get the map scale per frame (no camera travel needed). Only with map frames: ~300 x 3 numbers.
@@ -150,7 +200,8 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
 
         videoTimes.removeAll { frame.timestamp - $0 > 2 }
         mapTimes.removeAll { frame.timestamp - $0 > 2 }
-        onStatus?("\(link) · video \(videoTimes.count / 2) fps · map \(mapTimes.count / 2) fps · tracking \(tracking)"
+        let airpods = (bpm.map { " · ♥ \($0)" } ?? "") + (head.connected ? " · head ✓" : "")
+        onStatus?("\(link) · video \(videoTimes.count / 2) fps · map \(mapTimes.count / 2) fps · tracking \(tracking)\(airpods)"
                   + (lastError.isEmpty ? "" : "\nlast drop: \(lastError)"))
     }
 

@@ -47,6 +47,16 @@ nonisolated enum Wire {
         return binary(kind: 3, id: id, frame: frame, payload: p)
     }
 
+    /// Call audio (kind 7): mono int16 LE PCM, 16 kHz, 40 ms per chunk; frame = sequence number.
+    static func audioFrame(id: String, seq: UInt32, pcm: Data) -> Data {
+        binary(kind: 7, id: id, frame: seq, payload: pcm)
+    }
+
+    /// Small text messages: `hr`, `head`, `talk`.
+    static func json(_ obj: [String: Any]) -> String {
+        String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+    }
+
     /// `pose` text message. T is camera-to-world, column-major, metres.
     /// `fp`: ARKit feature points as [u, v, z] in the map image (pixels) with metric depth, sent with map frames only.
     static func pose(frame: UInt32, ts: Double, T: simd_float4x4, K: [Float], w: Int, h: Int, fp: [[Float]] = []) -> String {
