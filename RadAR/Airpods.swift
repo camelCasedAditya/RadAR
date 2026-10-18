@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMotion
 import Foundation
 import HealthKit

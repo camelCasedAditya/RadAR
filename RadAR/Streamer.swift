@@ -8,7 +8,7 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     let session = ARSession()
     var onStatus: (@Sendable (String) -> Void)?
 
-    private let queue = DispatchQueue(label: "radar.stream")
+    private let queue: DispatchQueue
     private let ci = CIContext()
     private let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
     private var ws: URLSessionWebSocketTask?
@@ -27,8 +27,8 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     private var lastError = ""
     // AirPods extras (Airpods.swift), all optional
     let voice = VoiceCall()
-    private lazy var heart = HeartRate(queue: queue)
-    private lazy var head = HeadTracker(queue: queue)
+    private let heart: HeartRate
+    private let head: HeadTracker
     private var phoneYaw = 0.0                   // camera heading in the ARKit world frame, as the hub computes it
     private var bpm: Int?
     private var audioSeq: UInt32 = 0
@@ -44,6 +44,14 @@ nonisolated final class Streamer: NSObject, ARSessionDelegate, @unchecked Sendab
     static let mapMove: Float = 0.02         // "still" = under 2 cm and 1 degree since the last map frame
     static let mapTurn: Float = 1 * .pi / 180
     static let mapFloor: TimeInterval = 1    // at least one map frame per second even when still
+
+    override init() {
+        let q = DispatchQueue(label: "radar.stream")
+        queue = q
+        heart = HeartRate(queue: q)
+        head = HeadTracker(queue: q)
+        super.init()
+    }
 
     func start(url: URL, id: String) {
         queue.async { [self] in
